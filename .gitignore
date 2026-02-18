@@ -1,0 +1,10 @@
+# Ignore everything
+*
+
+# Whitelist website files
+!index.html
+!privacy.html
+!style.css
+!files/
+!docs/
+!.gitignore

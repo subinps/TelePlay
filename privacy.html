@@ -1,0 +1,108 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Privacy Policy - TelePlay</title>
+    <link rel="stylesheet" href="style.css" />
+  </head>
+  <body>
+    <header>
+      <div class="container nav">
+        <div class="logo">📺 TelePlay</div>
+        <div class="nav-links">
+          <a href="index.html">Home</a>
+          <a href="docs/SETUP.md">Docs</a>
+          <a href="privacy.html" class="active">Privacy</a>
+          <a href="https://github.com/subinps/teleplay" target="_blank"
+            >GitHub</a
+          >
+        </div>
+      </div>
+    </header>
+
+    <section class="container docs-content">
+      <h1>Privacy Policy</h1>
+      <p>Last updated: February 14, 2024</p>
+
+      <h2>1. Introduction</h2>
+      <p>
+        TelePlay ("we", "our", or "us") is an open-source self-hosted media
+        server application. This Privacy Policy explains how TelePlay handles
+        your data.
+      </p>
+
+      <h2>2. Data Collection and Usage</h2>
+      <p><strong>TelePlay is self-hosted software.</strong> This means:</p>
+      <ul>
+        <li>
+          We (the developers) <strong>do not</strong> host, store, or have
+          access to any of your files, messages, or personal data.
+        </li>
+        <li>
+          Your data resides strictly between
+          <strong>Telegram's servers</strong> and
+          <strong>your own self-hosted server</strong> (VPS, local machine,
+          etc.).
+        </li>
+        <li>
+          All authentication and file retrieval is done directly via the
+          Telegram API using credentials you provide.
+        </li>
+      </ul>
+
+      <h2>3. Telegram Data</h2>
+      <p>TelePlay acts as a client for the Telegram API. It accesses:</p>
+      <ul>
+        <li>Files you upload to the bot.</li>
+        <li>Messages in the configured storage channel.</li>
+        <li>
+          Basic profile information (User ID, First Name) for authentication.
+        </li>
+      </ul>
+      <p>
+        This data interacts only with Telegram's servers and your TelePlay
+        instance.
+      </p>
+
+      <h2>4. Third-Party Services</h2>
+      <ul>
+        <li>
+          <strong>Telegram:</strong> The app relies on Telegram's API. Please
+          refer to
+          <a href="https://telegram.org/privacy">Telegram's Privacy Policy</a>.
+        </li>
+        <li>
+          <strong>TMDB (Optional):</strong> If enabled, the app may fetch
+          metadata (posters, descriptions) from The Movie Database (TMDB).
+          Please refer to
+          <a href="https://www.themoviedb.org/privacy-policy"
+            >TMDB's Privacy Policy</a
+          >.
+        </li>
+      </ul>
+
+      <h2>5. Analytics</h2>
+      <p>
+        The core TelePlay application does not contain any tracking or analytics
+        code. It does not send crash reports or usage statistics to the
+        developers.
+      </p>
+
+      <h2>6. Contact Us</h2>
+      <p>
+        If you have questions about this Privacy Policy, please open an issue on
+        our
+        <a href="https://github.com/subinps/teleplay/issues"
+          >GitHub repository</a
+        >.
+      </p>
+    </section>
+
+    <footer>
+      <div class="container">
+        <p>&copy; 2024 TelePlay.</p>
+      </div>
+    </footer>
+  </body>
+</html>
