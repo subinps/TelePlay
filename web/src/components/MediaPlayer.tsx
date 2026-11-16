@@ -1,28 +1,27 @@
 /**
  * Hearth — MediaPlayer (TV-first, remote-first)
  * ─────────────────────────────────────────────────────────────────────────────
- * Implements README §7.3 (defects F6, F7, F14a–i, F16), §4.6 stream tokens,
- * §4.8 honest capability set, §6.3 device limit + heartbeat, §8.3 player UX.
+ * THIS REVISION
+ *  · INSTANT START (P1): exports prewarmPlayback() so a card can start the session
+ *    on focus/hover; the player consumes that warm session and mounts <video>
+ *    immediately. The old "wait for /files/{id} AND /playback/start" gate is gone —
+ *    resume position comes from the grid data we already have.
+ *  · SETTINGS RELAYOUT: Speed → Quality → Audio → Subtitles → Info (bottom).
+ *    Aspect is OUT of the panel.
+ *  · CROP BUTTON left of the gear, cycles fit → fill → stretch → fit (key: c).
+ *  · QUALITY 480p / 720p / 1080p(Original). Enabled only when the server reports a
+ *    prepared rendition; otherwise disabled with the reason + admin Prepare action.
+ *    Switching preserves the exact timestamp.
+ *  · AUDIO uses native audioTracks when the browser exposes them (Safari), else the
+ *    server-probed track list. Chrome has not implemented track switching, so
+ *    non-native selection is gated on the server remux capability — never a dead control.
+ *  · ERROR HONESTY: on a media error we probe the stream URL for the real HTTP status,
+ *    so a 500 is reported as a server problem, not a codec problem.
  *
- * Kept (working logic):  useAppStore (previewFile / minimize), useFile,
- *                        useUpdateProgress, 10 s progress save, save on
- *                        pause / unmount / pagehide, 95 % resume rule.
- * Removed:               VLC / Copy / Download panel, public-link effect,
- *                        login token in URLs, unused Button helper,
- *                        hover-only UI, mouse-only control reveal.
- * Added:                 POST /playback/start signed per-file/per-device URL,
- *                        20 s heartbeat (410 → "another device took over"),
- *                        409 DEVICE_LIMIT dialog with admin kick,
- *                        suffix-safe seeking, buffered bar, ref-driven
- *                        progress paint (≤ 1 re-render/s), debounced 300 ms
- *                        buffering spinner + seconds-ahead, resume toast,
- *                        settings panel (speed / aspect / subtitles / audio /
- *                        info), persisted prefs, full remote key map with
- *                        hold-to-escalate seek (10→30→60 s), Tizen key
- *                        registration, focus-managed TV navigation.
- * Graceful fallback:     if /playback/* is not deployed yet (404/405), the
- *                        player falls back to the legacy stream route so
- *                        playback never blocks on backend phase ordering.
+ * Kept: Back button always exits · controls stay while buffering · deduped progress ·
+ *       pointer-events passthrough so clicking the picture toggles play/pause ·
+ *       signed per-file/per-device tokens · 409 device-limit dialog · 410 takeover card ·
+ *       full remote key map · minimize bar.
  * ─────────────────────────────────────────────────────────────────────────────
  */
 import { useCallback, useEffect, useRef, useState } from 'react';
@@ -35,9 +34,9 @@ import type {
 } from 'react';
 import {
     ArrowLeft, AlertTriangle, Check, ChevronDown, ChevronUp, Crop, FastForward,
-    Film, Gauge, Info, Loader2, Maximize, Minimize, Minus, Monitor, Music, Pause,
-    PictureInPicture2, Play, Plus, RectangleHorizontal, Rewind, RotateCcw,
-    Settings, Smartphone, StretchHorizontal, Subtitles, Tablet, Tv, Users,
+    Film, Gauge, Info, Layers, Loader2, Maximize, Minimize, Minus, Monitor, Music,
+    Pause, PictureInPicture2, Play, Plus, RectangleHorizontal, Rewind, RotateCcw,
+    Settings, Smartphone, Sparkles, StretchHorizontal, Subtitles, Tablet, Tv, Users,
     Volume1, Volume2, VolumeX, X,
 } from 'lucide-react';
 import { TelegramFile, formatDuration, useUpdateProgress, useFile, api } from '../lib/api';
@@ -45,7 +44,10 @@ import { useAppStore } from '../lib/store';
 
 /* ═══════════════════════════ Types & constants ═══════════════════════════ */
 
-/** Fields the upgraded backend returns (schemas.py adds these in Phase 2/4). */
+interface Rendition { label?: string; height: number; file_id: number }
+interface AudioTrackMeta { index: number; label?: string; language?: string; codec?: string; default?: boolean }
+interface SubtitleTrack { lang: string; label: string; url: string }
+
 type PlayerFile = TelegramFile & {
     mime_type?: string | null;
     completed?: boolean;
@@ -53,8 +55,10 @@ type PlayerFile = TelegramFile & {
     width?: number | null;
     height?: number | null;
     subtitles?: SubtitleTrack[];
+    renditions?: Rendition[];
+    audio_tracks?: AudioTrackMeta[];
+    audio_remux?: boolean;
 };
-interface SubtitleTrack { lang: string; label: string; url: string }
 interface ActiveDevice { device_id: string; label: string; file_id: number; role: string }
 interface AudioTrackInfo { index: number; label: string; enabled: boolean }
 type Aspect = 'fit' | 'fill' | 'stretch';
@@ -64,12 +68,18 @@ interface Prefs { volume: number; muted: boolean; rate: number; aspect: Aspect; 
 type MutableRef<T> = { current: T | null };
 
 const SPEEDS: readonly number[] = [0.5, 0.75, 1, 1.25, 1.5, 1.75, 2];
-const ASPECTS: { id: Aspect; label: string; hint: string; icon: typeof Crop }[] = [
-    { id: 'fit', label: 'Fit', hint: 'Whole picture', icon: RectangleHorizontal },
-    { id: 'fill', label: 'Fill', hint: 'Crop to screen', icon: Crop },
-    { id: 'stretch', label: 'Stretch', hint: 'Distort to fill', icon: StretchHorizontal },
-];
+const ASPECT_ORDER: Aspect[] = ['fit', 'fill', 'stretch'];
+const ASPECT_META: Record<Aspect, { label: string; hint: string; icon: typeof Crop }> = {
+    fit: { label: 'Fit', hint: 'Whole picture', icon: RectangleHorizontal },
+    fill: { label: 'Fill', hint: 'Crop to screen', icon: Crop },
+    stretch: { label: 'Stretch', hint: 'Distort to fill', icon: StretchHorizontal },
+};
 const ASPECT_FIT: Record<Aspect, 'contain' | 'cover' | 'fill'> = { fit: 'contain', fill: 'cover', stretch: 'fill' };
+const QUALITIES: { label: string; height: number }[] = [
+    { label: '480p', height: 480 },
+    { label: '720p', height: 720 },
+    { label: '1080p', height: 1080 },
+];
 const PREFS_KEY = 'hearth_player_prefs';
 const DEVICE_KEY = 'hearth_device_id';
 const DEFAULT_PREFS: Prefs = { volume: 1, muted: false, rate: 1, aspect: 'fit', subtitleLang: 'off' };
@@ -83,8 +93,7 @@ const BTN_GHOST =
 
 const PLAYER_CSS = `
 [data-hp-root]{-webkit-tap-highlight-color:transparent;}
-[data-hp-root] .hp-focus:focus{outline:none;}
-[data-hp-root] .hp-focus:focus-visible{outline:4px solid #5eead4;outline-offset:3px;border-radius:14px;}
+[data-hp-root] .hp-focus:focus{outline:4px solid #5eead4;outline-offset:3px;border-radius:14px;}
 .hp-scroll{scrollbar-width:thin;scrollbar-color:#115e59 #0e1514;}
 .hp-scroll::-webkit-scrollbar{width:10px;}
 .hp-scroll::-webkit-scrollbar-track{background:#0e1514;border-radius:8px;}
@@ -95,9 +104,9 @@ const PLAYER_CSS = `
 @keyframes hpScaleIn{from{opacity:0;transform:scale(.96)}to{opacity:1;transform:scale(1)}}
 @keyframes hpSlideIn{from{opacity:0;transform:translateX(24px)}to{opacity:1;transform:none}}
 @keyframes hpGlow{0%,100%{box-shadow:0 0 0 0 rgba(45,212,191,.30)}50%{box-shadow:0 0 36px 6px rgba(45,212,191,.22)}}
-.hp-fade-up{animation:hpFadeUp .2s ease-out both}
-.hp-scale-in{animation:hpScaleIn .16s ease-out both}
-.hp-slide-in{animation:hpSlideIn .2s ease-out both}
+.hp-fade-up{animation:hpFadeUp .2s ease-out backwards}
+.hp-scale-in{animation:hpScaleIn .16s ease-out backwards}
+.hp-slide-in{animation:hpSlideIn .2s ease-out backwards}
 .hp-spin{animation:hpSpin .9s linear infinite}
 .hp-glow{animation:hpGlow 2.4s ease-in-out infinite}
 @media (prefers-reduced-motion:reduce){.hp-fade-up,.hp-scale-in,.hp-slide-in,.hp-glow{animation:none}}
@@ -124,7 +133,6 @@ const axStatus = (e: unknown) => (e as { response?: { status?: number } })?.resp
 const axDetail = (e: unknown) =>
     (e as { response?: { data?: { detail?: unknown } } })?.response?.data?.detail;
 
-/** F16 fix: resolve API paths against the API origin, never the Pages origin. */
 const resolveApiUrl = (path: string): string => {
     if (/^https?:\/\//i.test(path)) return path;
     const base = api.defaults.baseURL ?? '/api';
@@ -132,7 +140,6 @@ const resolveApiUrl = (path: string): string => {
     return new URL(path, origin).href;
 };
 
-/* Device identity — persistent UUID so refresh/tabs never count twice (§4.5). */
 function getDeviceId(): string {
     try {
         let id = localStorage.getItem(DEVICE_KEY);
@@ -161,7 +168,6 @@ const deviceIcon = (label: string) =>
         : /phone|iphone|android/i.test(label) ? Smartphone
             : /tablet|ipad/i.test(label) ? Tablet : Monitor;
 
-/* Persisted player prefs (§7.2 — self-contained until store.ts is upgraded). */
 function loadPrefs(): Prefs {
     try {
         const raw = localStorage.getItem(PREFS_KEY);
@@ -171,7 +177,7 @@ function loadPrefs(): Prefs {
                 volume: clamp(Number(p.volume ?? 1), 0, 1),
                 muted: !!p.muted,
                 rate: SPEEDS.includes(Number(p.rate)) ? Number(p.rate) : 1,
-                aspect: (['fit', 'fill', 'stretch'] as const).includes(p.aspect as Aspect) ? (p.aspect as Aspect) : 'fit',
+                aspect: ASPECT_ORDER.includes(p.aspect as Aspect) ? (p.aspect as Aspect) : 'fit',
                 subtitleLang: typeof p.subtitleLang === 'string' ? p.subtitleLang : 'off',
             };
         }
@@ -179,7 +185,6 @@ function loadPrefs(): Prefs {
     return { ...DEFAULT_PREFS };
 }
 
-/* Role (admin vs guest) — cached; defaults to admin pre-Phase-2. */
 let roleCache: string | null = null;
 let rolePromise: Promise<string> | null = null;
 function fetchRole(): Promise<string> {
@@ -197,7 +202,6 @@ function fetchRole(): Promise<string> {
     return rolePromise;
 }
 
-/* Thumbnail blobs — Authorization header, never a token in a URL (§4.6). */
 const thumbCache = new Map<number, string>();
 const thumbOrder: number[] = [];
 function useThumbnail(fileId: number, url?: string | null): string | null {
@@ -229,7 +233,6 @@ function useThumbnail(fileId: number, url?: string | null): string | null {
     return src;
 }
 
-/** Fire-and-forget session release that survives page teardown. */
 function stopPlaybackRequest(deviceId: string) {
     try {
         const token = localStorage.getItem('access_token');
@@ -240,6 +243,75 @@ function stopPlaybackRequest(deviceId: string) {
             body: JSON.stringify({ device_id: deviceId }),
         }).catch(() => { /* best effort */ });
     } catch { /* best effort */ }
+}
+
+/* ═══════════════════ P1 · Pre-warm (import from the grid) ═══════════════════
+ * Focus/hover a card → the session, the Telegram message and the cross-DC media
+ * session are all warmed before OK is pressed. Re-starting the SAME device never
+ * consumes a second slot, so the 2-screen limit is unaffected.
+ * ═══════════════════════════════════════════════════════════════════════════ */
+
+interface PrewarmEntry { src: string; mode: 'signed' | 'legacy'; beatSec: number; at: number }
+const PREWARM_TTL = 4 * 60 * 1000;
+const prewarmCache = new Map<number, PrewarmEntry>();
+let prewarmTimer: ReturnType<typeof setTimeout> | null = null;
+let prewarmTarget: number | null = null;
+
+function freshPrewarm(fileId: number): PrewarmEntry | null {
+    const hit = prewarmCache.get(fileId);
+    if (!hit) return null;
+    if (Date.now() - hit.at > PREWARM_TTL) { prewarmCache.delete(fileId); return null; }
+    return hit;
+}
+
+export function takePrewarm(fileId: number): PrewarmEntry | null {
+    const hit = freshPrewarm(fileId);
+    if (hit) prewarmCache.delete(fileId);
+    return hit;
+}
+
+export function clearPrewarm(): void {
+    prewarmCache.clear();
+    prewarmTarget = null;
+    if (prewarmTimer) { clearTimeout(prewarmTimer); prewarmTimer = null; }
+}
+
+/** Debounced: only the card the user settles on is warmed. */
+export function prewarmPlayback(file: TelegramFile): void {
+    if (!file?.id || freshPrewarm(file.id)) return;
+    prewarmTarget = file.id;
+    if (prewarmTimer) clearTimeout(prewarmTimer);
+    prewarmTimer = setTimeout(() => {
+        prewarmTimer = null;
+        void doPrewarm(file);
+    }, 220);
+}
+
+async function doPrewarm(file: TelegramFile): Promise<void> {
+    if (prewarmTarget !== file.id || freshPrewarm(file.id)) return;
+    try {
+        const { data } = await api.post('/playback/start', {
+            file_id: file.id, device_id: getDeviceId(), device_label: getDeviceLabel(),
+        });
+        const d = data as { stream_url?: string; heartbeat_seconds?: number };
+        if (!d?.stream_url || prewarmTarget !== file.id) return;
+        const entry: PrewarmEntry = {
+            src: resolveApiUrl(d.stream_url),
+            mode: 'signed',
+            beatSec: clamp(Number(d.heartbeat_seconds) || 20, 5, 60),
+            at: Date.now(),
+        };
+        prewarmCache.set(file.id, entry);
+        while (prewarmCache.size > 4) {
+            const oldest = prewarmCache.keys().next().value as number | undefined;
+            if (oldest === undefined) break;
+            prewarmCache.delete(oldest);
+        }
+        // Two bytes: warms the Telegram message, the DC media session and the head cache.
+        void fetch(entry.src, { headers: { Range: 'bytes=0-1' } }).catch(() => { /* best effort */ });
+    } catch {
+        /* pre-warm is opportunistic — never surface an error for it */
+    }
 }
 
 /* ═════════════════ Playback session (start / heartbeat / limit) ═════════════════ */
@@ -254,7 +326,7 @@ interface PlaybackSession {
     retry: () => void;
 }
 
-function usePlaybackSession(file: PlayerFile): PlaybackSession {
+function usePlaybackSession(fileId: number, legacyUrl: string | null | undefined, audioIndex: number | null): PlaybackSession {
     const [attempt, setAttempt] = useState(0);
     const [phase, setPhase] = useState<SessionPhase>('starting');
     const [src, setSrc] = useState<string | null>(null);
@@ -268,18 +340,33 @@ function usePlaybackSession(file: PlayerFile): PlaybackSession {
 
     useEffect(() => {
         let cancelled = false;
-        setPhase('starting'); setSrc(null); setError(null);
+        setError(null);
+
+        const withAudio = (url: string) =>
+            audioIndex && audioIndex > 0 ? `${url}${url.includes('?') ? '&' : '?'}audio=${audioIndex}` : url;
+
+        // A pre-warmed session means zero network wait before <video> mounts.
+        const warm = audioIndex ? null : takePrewarm(fileId);
+        if (warm) {
+            setMode(warm.mode);
+            setBeatSec(warm.beatSec);
+            setSrc(warm.src);
+            setPhase('ready');
+            return () => { cancelled = true; };
+        }
+
+        setPhase('starting'); setSrc(null);
         (async () => {
             try {
                 const { data } = await api.post('/playback/start', {
-                    file_id: file.id, device_id: deviceId, device_label: getDeviceLabel(),
+                    file_id: fileId, device_id: deviceId, device_label: getDeviceLabel(),
                 });
                 if (cancelled) return;
                 const d = data as { stream_url?: string; heartbeat_seconds?: number };
                 if (!d?.stream_url) throw new Error('missing stream_url');
                 setMode('signed');
                 setBeatSec(clamp(Number(d.heartbeat_seconds) || 20, 5, 60));
-                setSrc(resolveApiUrl(d.stream_url));
+                setSrc(withAudio(resolveApiUrl(d.stream_url)));
                 setPhase('ready');
             } catch (err) {
                 if (cancelled) return;
@@ -291,43 +378,41 @@ function usePlaybackSession(file: PlayerFile): PlaybackSession {
                     setPhase('limited');
                     return;
                 }
-                /* Route not deployed yet → legacy stream so playback still works. */
                 const routeMissing = status === 405
                     || (status === 404 && (typeof detail !== 'string' || detail === 'Not Found'));
-                if (routeMissing && file.stream_url) {
+                if (routeMissing && legacyUrl) {
                     const token = localStorage.getItem('access_token') ?? '';
-                    const sep = file.stream_url.includes('?') ? '&' : '?';
+                    const sep = legacyUrl.includes('?') ? '&' : '?';
                     setMode('legacy');
-                    setSrc(resolveApiUrl(`${file.stream_url}${sep}token=${encodeURIComponent(token)}`));
+                    setSrc(withAudio(resolveApiUrl(`${legacyUrl}${sep}token=${encodeURIComponent(token)}`)));
                     setPhase('ready');
                     return;
                 }
                 if (status === 404) setError('This file is no longer in the library. It may have been deleted from Telegram.');
                 else if (status === 401) setError('Your sign-in expired. Close the player and sign in again.');
+                else if (status === 503) setError('Telegram is not reachable right now. Nothing was lost — try again in a moment.');
                 else setError('Could not start playback. Check your connection and try again.');
                 setPhase('error');
             }
         })();
         return () => { cancelled = true; };
-    }, [file.id, attempt, deviceId, file.stream_url]);
+    }, [fileId, attempt, deviceId, legacyUrl, audioIndex]);
 
-    /* Release the slot on unmount / file switch (signed mode only). */
     useEffect(() => () => {
         if (modeRef.current === 'signed') stopPlaybackRequest(deviceId);
-    }, [file.id, deviceId]);
+    }, [deviceId]);
 
-    /* Heartbeat every 20 s while the player holds a session (§6.3). */
     useEffect(() => {
         if (mode !== 'signed' || phase !== 'ready') return;
         const iv = setInterval(async () => {
             try {
-                await api.post('/playback/heartbeat', { device_id: deviceId, file_id: file.id });
+                await api.post('/playback/heartbeat', { device_id: deviceId, file_id: fileId });
             } catch (err) {
                 if (axStatus(err) === 410) setPhase('ended');
             }
         }, beatSec * 1000);
         return () => clearInterval(iv);
-    }, [mode, phase, beatSec, file.id, deviceId]);
+    }, [mode, phase, beatSec, fileId, deviceId]);
 
     const retry = useCallback(() => setAttempt(a => a + 1), []);
     return { phase, src, mode, active, error, deviceId, retry };
@@ -335,14 +420,14 @@ function usePlaybackSession(file: PlayerFile): PlaybackSession {
 
 /* ═══════════════════════════════ UI atoms ═══════════════════════════════ */
 
-function HearthMark({ small = false }: { small?: boolean }) {
+function HearthMark() {
     return (
         <div className="flex items-center gap-2.5">
-            <span className={`hp-glow relative inline-flex items-center justify-center rounded-full bg-gradient-to-br from-[#2dd4bf] to-[#0d9488] ${small ? 'h-6 w-6' : 'h-10 w-10'}`}>
-                <span className={`rounded-full bg-[#04110f] ${small ? 'h-2 w-2' : 'h-3.5 w-3.5'}`} />
-                <span className={`absolute rounded-full bg-[#5eead4] ${small ? '-right-px -top-px h-1.5 w-1.5' : '-right-0.5 -top-0.5 h-2 w-2'}`} />
+            <span className="hp-glow relative inline-flex h-10 w-10 items-center justify-center rounded-full bg-gradient-to-br from-[#2dd4bf] to-[#0d9488]">
+                <span className="h-3.5 w-3.5 rounded-full bg-[#04110f]" />
+                <span className="absolute -right-0.5 -top-0.5 h-2 w-2 rounded-full bg-[#5eead4]" />
             </span>
-            <span className={`font-black tracking-tight text-[#e8f1ef] ${small ? 'text-sm' : 'text-2xl'}`}>Hearth</span>
+            <span className="text-2xl font-black tracking-tight text-[#e8f1ef]">Hearth</span>
         </div>
     );
 }
@@ -367,17 +452,20 @@ function IconBtn({ label, onClick, children, refEl, active = false, className = 
     );
 }
 
-function Chip({ selected, onClick, children, autofocus = false }: {
-    selected: boolean; onClick: () => void; children: ReactNode; autofocus?: boolean;
+function Chip({ selected, onClick, children, autofocus = false, disabled = false, title }: {
+    selected: boolean; onClick: () => void; children: ReactNode;
+    autofocus?: boolean; disabled?: boolean; title?: string;
 }) {
     return (
         <button
-            type="button" onClick={onClick} aria-pressed={selected}
+            type="button" onClick={onClick} aria-pressed={selected} disabled={disabled} title={title}
             data-hp-autofocus={autofocus || undefined}
             className={`hp-focus inline-flex items-center gap-1.5 rounded-xl border px-3.5 py-2 text-sm font-semibold transition-all duration-150 ${
-                selected
-                    ? 'border-[#2dd4bf] bg-[#2dd4bf]/15 text-[#5eead4]'
-                    : 'border-[#2b3a38] bg-[#141d1c] text-[#c3d6d2] hover:border-[#2dd4bf]/50 hover:text-white'
+                disabled
+                    ? 'cursor-not-allowed border-[#1a2524] bg-[#101918] text-[#3f524f]'
+                    : selected
+                        ? 'border-[#2dd4bf] bg-[#2dd4bf]/15 text-[#5eead4]'
+                        : 'border-[#2b3a38] bg-[#141d1c] text-[#c3d6d2] hover:border-[#2dd4bf]/50 hover:text-white'
             }`}
         >
             {children}
@@ -402,7 +490,19 @@ function InfoRow({ k, v }: { k: string; v: string }) {
     );
 }
 
-/* ═══════════════════════════ Scrubber (F14c) ═══════════════════════════ */
+function Note({ children, tone = 'muted' }: { children: ReactNode; tone?: 'muted' | 'warn' }) {
+    return (
+        <p className={`mt-2 rounded-xl border px-3.5 py-2.5 text-xs leading-relaxed ${
+            tone === 'warn'
+                ? 'border-[#fbbf24]/25 bg-[#fbbf24]/10 text-[#fbbf24]/90'
+                : 'border-[#1a2524] bg-[#141d1c] text-[#9db6b1]'
+        }`}>
+            {children}
+        </p>
+    );
+}
+
+/* ═══════════════════════════ Scrubber ═══════════════════════════ */
 
 function Scrubber({ duration, sec, disabled, fillRef, bufRef, thumbRef, scrubberRef, onSeek, onDragState }: {
     duration: number; sec: number; disabled?: boolean;
@@ -467,14 +567,11 @@ function Scrubber({ duration, sec, disabled, fillRef, bufRef, thumbRef, scrubber
             className="hp-focus group relative flex-1 cursor-pointer select-none py-3"
             onPointerDown={down} onPointerMove={move} onPointerUp={up} onPointerCancel={cancel}
         >
-            <div ref={trackRef} className="relative h-1.5 rounded-full bg-white/15 transition-all duration-150 group-hover:h-2.5 group-focus-visible:h-2.5">
-                {/* Buffered */}
+            <div ref={trackRef} className="relative h-1.5 rounded-full bg-white/15 transition-all duration-150 group-hover:h-2.5 group-focus:h-2.5">
                 <div ref={bufRef} className="absolute inset-0 origin-left rounded-full bg-white/25" style={{ transform: 'scaleX(0)' }} />
-                {/* Played */}
                 <div ref={fillRef} className="absolute inset-0 origin-left rounded-full bg-gradient-to-r from-[#0d9488] via-[#2dd4bf] to-[#5eead4]" style={{ transform: 'scaleX(0)' }} />
-                {/* Always-visible thumb */}
                 <div ref={thumbRef} className="absolute top-1/2 z-10 -translate-x-1/2 -translate-y-1/2" style={{ left: '0%' }}>
-                    <div className="h-4 w-4 rounded-full bg-white shadow-[0_0_0_4px_rgba(45,212,191,0.35),0_2px_10px_rgba(0,0,0,0.6)] transition-transform duration-150 group-hover:scale-125 group-focus-visible:scale-125" />
+                    <div className="h-4 w-4 rounded-full bg-white shadow-[0_0_0_4px_rgba(45,212,191,0.35),0_2px_10px_rgba(0,0,0,0.6)] transition-transform duration-150 group-hover:scale-125 group-focus:scale-125" />
                 </div>
                 {preview !== null && (
                     <div
@@ -488,8 +585,6 @@ function Scrubber({ duration, sec, disabled, fillRef, bufRef, thumbRef, scrubber
         </div>
     );
 }
-
-/* ═══════════════════════ Volume bar (focusable, F14d) ═══════════════════════ */
 
 function VolumeBar({ value, muted, onChange }: { value: number; muted: boolean; onChange: (v: number) => void }) {
     const ref = useRef<HTMLDivElement>(null);
@@ -518,26 +613,41 @@ function VolumeBar({ value, muted, onChange }: { value: number; muted: boolean; 
     );
 }
 
-/* ═══════════════════════════ Settings panel (§8.3) ═══════════════════════════ */
+/* ═══════════════════ Settings: Speed → Quality → Audio → Subs → Info ═══════════════════ */
 
-function SettingsPanel({ panelRef, onClose, prefs, onRate, onAspect, onSubtitle, subs, audioTracks, onAudio, info }: {
+function SettingsPanel({
+    panelRef, onClose, prefs, onRate,
+    qualities, currentQuality, onQuality, canPrepare, onPrepare, preparing,
+    nativeAudio, serverAudio, audioRemux, currentAudio, onNativeAudio, onServerAudio,
+    subs, onSubtitle, info,
+}: {
     panelRef: MutableRef<HTMLDivElement>;
     onClose: () => void;
     prefs: Prefs;
     onRate: (r: number) => void;
-    onAspect: (a: Aspect) => void;
-    onSubtitle: (lang: string) => void;
+    qualities: { label: string; height: number; fileId: number | null }[];
+    currentQuality: number;
+    onQuality: (height: number, fileId: number | null) => void;
+    canPrepare: boolean;
+    onPrepare: () => void;
+    preparing: boolean;
+    nativeAudio: AudioTrackInfo[];
+    serverAudio: AudioTrackMeta[];
+    audioRemux: boolean;
+    currentAudio: number;
+    onNativeAudio: (index: number) => void;
+    onServerAudio: (index: number) => void;
     subs: SubtitleTrack[];
-    audioTracks: AudioTrackInfo[];
-    onAudio: (index: number) => void;
+    onSubtitle: (lang: string) => void;
     info: { k: string; v: string }[];
 }) {
+    const anyLower = qualities.some(q => q.height < 1080 && q.fileId !== null);
     return (
         <div className="absolute inset-0 z-[120]">
-            <div className="absolute inset-0 bg-black/55" onClick={onClose} aria-hidden="true" />
+            <div className="pointer-events-auto absolute inset-0 bg-black/55" onClick={onClose} aria-hidden="true" />
             <div
                 ref={panelRef} role="dialog" aria-modal="true" aria-label="Player settings"
-                className="hp-slide-in absolute inset-y-0 right-0 flex w-[min(400px,94vw)] flex-col border-l border-[#1a2524] bg-[#0e1514] shadow-[-30px_0_60px_rgba(0,0,0,0.55)]"
+                className="hp-slide-in pointer-events-auto absolute inset-y-0 right-0 flex w-[min(400px,94vw)] flex-col border-l border-[#1a2524] bg-[#0e1514] shadow-[-30px_0_60px_rgba(0,0,0,0.55)]"
             >
                 <div className="flex items-center justify-between border-b border-[#1a2524] px-5 py-4">
                     <h2 className="flex items-center gap-2 text-lg font-bold text-[#e8f1ef]">
@@ -547,6 +657,7 @@ function SettingsPanel({ panelRef, onClose, prefs, onRate, onAspect, onSubtitle,
                 </div>
 
                 <div className="hp-scroll flex-1 space-y-7 overflow-y-auto px-5 py-5">
+                    {/* 1 · SPEED */}
                     <section>
                         <SectionTitle icon={Gauge}>Speed</SectionTitle>
                         <div className="flex flex-wrap gap-2">
@@ -558,29 +669,96 @@ function SettingsPanel({ panelRef, onClose, prefs, onRate, onAspect, onSubtitle,
                         </div>
                     </section>
 
+                    {/* 2 · QUALITY */}
                     <section>
-                        <SectionTitle icon={RectangleHorizontal}>Aspect</SectionTitle>
+                        <SectionTitle icon={Layers}>Quality</SectionTitle>
                         <div className="grid grid-cols-3 gap-2">
-                            {ASPECTS.map(a => {
-                                const Icon = a.icon;
-                                const sel = prefs.aspect === a.id;
+                            {qualities.map(q => {
+                                const available = q.fileId !== null;
+                                const sel = currentQuality === q.height;
                                 return (
                                     <button
-                                        key={a.id} type="button" onClick={() => onAspect(a.id)} aria-pressed={sel}
-                                        className={`hp-focus flex flex-col items-center gap-1.5 rounded-xl border px-2 py-3 transition-all duration-150 ${
-                                            sel ? 'border-[#2dd4bf] bg-[#2dd4bf]/15 text-[#5eead4]'
-                                                : 'border-[#2b3a38] bg-[#141d1c] text-[#c3d6d2] hover:border-[#2dd4bf]/50 hover:text-white'
+                                        key={q.height} type="button" disabled={!available}
+                                        aria-pressed={sel}
+                                        title={available ? `${q.label}${q.height === 1080 ? ' — original' : ''}` : `${q.label} has not been prepared for this video`}
+                                        onClick={() => onQuality(q.height, q.fileId)}
+                                        className={`hp-focus flex flex-col items-center gap-1 rounded-xl border px-2 py-3 transition-all duration-150 ${
+                                            !available
+                                                ? 'cursor-not-allowed border-[#1a2524] bg-[#101918] text-[#3f524f]'
+                                                : sel
+                                                    ? 'border-[#2dd4bf] bg-[#2dd4bf]/15 text-[#5eead4]'
+                                                    : 'border-[#2b3a38] bg-[#141d1c] text-[#c3d6d2] hover:border-[#2dd4bf]/50 hover:text-white'
                                         }`}
                                     >
-                                        <Icon className="h-5 w-5" />
-                                        <span className="text-sm font-bold">{a.label}</span>
-                                        <span className="text-[10px] text-[#9db6b1]">{a.hint}</span>
+                                        <span className="text-sm font-bold">{q.label}</span>
+                                        <span className="text-[10px] text-[#9db6b1]">
+                                            {q.height === 1080 ? 'Original' : available ? 'Ready' : 'Not prepared'}
+                                        </span>
                                     </button>
                                 );
                             })}
                         </div>
+                        {!anyLower && (
+                            <>
+                                <Note>
+                                    Only the original is stored on Telegram. Lower qualities must be prepared once on the
+                                    server — they are never re-encoded on the fly.
+                                </Note>
+                                {canPrepare && (
+                                    <button
+                                        type="button" onClick={onPrepare} disabled={preparing}
+                                        className="hp-focus mt-2 inline-flex items-center gap-2 rounded-xl border border-[#2dd4bf]/40 bg-[#2dd4bf]/10 px-3.5 py-2 text-xs font-bold text-[#5eead4] transition-all duration-150 hover:bg-[#2dd4bf]/20 disabled:opacity-50"
+                                    >
+                                        {preparing ? <Loader2 className="hp-spin h-3.5 w-3.5" /> : <Sparkles className="h-3.5 w-3.5" />}
+                                        {preparing ? 'Requesting…' : 'Prepare 480p / 720p'}
+                                    </button>
+                                )}
+                            </>
+                        )}
                     </section>
 
+                    {/* 3 · AUDIO */}
+                    <section>
+                        <SectionTitle icon={Music}>Audio</SectionTitle>
+                        {nativeAudio.length > 1 ? (
+                            <div className="flex flex-wrap gap-2">
+                                {nativeAudio.map(t => (
+                                    <Chip key={t.index} selected={t.enabled} onClick={() => onNativeAudio(t.index)}>
+                                        {t.enabled && <Check className="h-3.5 w-3.5" />}{t.label}
+                                    </Chip>
+                                ))}
+                            </div>
+                        ) : serverAudio.length > 1 ? (
+                            <>
+                                <div className="flex flex-wrap gap-2">
+                                    {serverAudio.map(t => {
+                                        const label = t.label || t.language || `Track ${t.index + 1}`;
+                                        const sel = currentAudio === t.index;
+                                        return (
+                                            <Chip
+                                                key={t.index} selected={sel} disabled={!audioRemux}
+                                                title={audioRemux ? label : 'This browser cannot switch tracks; server remux is not enabled yet'}
+                                                onClick={() => onServerAudio(t.index)}
+                                            >
+                                                {sel && <Check className="h-3.5 w-3.5" />}
+                                                {label}{t.codec ? ` · ${t.codec}` : ''}
+                                            </Chip>
+                                        );
+                                    })}
+                                </div>
+                                {!audioRemux && (
+                                    <Note tone="warn">
+                                        This browser can’t switch embedded audio tracks itself. Choosing another track needs
+                                        the server to remux it (video untouched, audio converted) — that pipeline isn’t enabled yet.
+                                    </Note>
+                                )}
+                            </>
+                        ) : (
+                            <Note>This file has a single audio track.</Note>
+                        )}
+                    </section>
+
+                    {/* 4 · SUBTITLES */}
                     <section>
                         <SectionTitle icon={Subtitles}>Subtitles</SectionTitle>
                         {subs.length > 0 ? (
@@ -593,25 +771,13 @@ function SettingsPanel({ panelRef, onClose, prefs, onRate, onAspect, onSubtitle,
                                 ))}
                             </div>
                         ) : (
-                            <p className="rounded-xl border border-[#1a2524] bg-[#141d1c] px-3.5 py-2.5 text-sm text-[#9db6b1]">
+                            <Note>
                                 No subtitles for this file. Send a sidecar <span className="font-mono text-[#c3d6d2]">.srt</span> to the bot to add them.
-                            </p>
+                            </Note>
                         )}
                     </section>
 
-                    {audioTracks.length > 1 && (
-                        <section>
-                            <SectionTitle icon={Music}>Audio</SectionTitle>
-                            <div className="flex flex-wrap gap-2">
-                                {audioTracks.map(t => (
-                                    <Chip key={t.index} selected={t.enabled} onClick={() => onAudio(t.index)}>
-                                        {t.enabled && <Check className="h-3.5 w-3.5" />}{t.label}
-                                    </Chip>
-                                ))}
-                            </div>
-                        </section>
-                    )}
-
+                    {/* 5 · INFO (bottom) */}
                     <section>
                         <SectionTitle icon={Info}>Info</SectionTitle>
                         <dl className="rounded-xl border border-[#1a2524] bg-[#141d1c] px-4 py-2">
@@ -628,11 +794,11 @@ function SettingsPanel({ panelRef, onClose, prefs, onRate, onAspect, onSubtitle,
     );
 }
 
-/* ═══════════════════════ Dialogs & cards (§7.4 / §8.3) ═══════════════════════ */
+/* ═══════════════════════ Dialogs ═══════════════════════ */
 
 function CardShell({ dialogRef, children }: { dialogRef: MutableRef<HTMLDivElement>; children: ReactNode }) {
     return (
-        <div className="absolute inset-0 z-[110] flex items-center justify-center bg-black/70 p-6">
+        <div className="pointer-events-auto absolute inset-0 z-[110] flex items-center justify-center bg-black/70 p-6">
             <div
                 ref={dialogRef} role="dialog" aria-modal="true"
                 className="hp-scale-in w-full max-w-md rounded-2xl border border-[#1a2524] bg-[#0e1514] p-6 shadow-[0_30px_80px_-20px_rgba(0,0,0,0.9),0_0_50px_-18px_rgba(45,212,191,0.35)]"
@@ -644,13 +810,8 @@ function CardShell({ dialogRef, children }: { dialogRef: MutableRef<HTMLDivEleme
 }
 
 function DeviceLimitDialog({ dialogRef, active, role, busy, onKick, onRetry, onClose }: {
-    dialogRef: MutableRef<HTMLDivElement>;
-    active: ActiveDevice[];
-    role: string;
-    busy: string | null;
-    onKick: (d: ActiveDevice) => void;
-    onRetry: () => void;
-    onClose: () => void;
+    dialogRef: MutableRef<HTMLDivElement>; active: ActiveDevice[]; role: string; busy: string | null;
+    onKick: (d: ActiveDevice) => void; onRetry: () => void; onClose: () => void;
 }) {
     return (
         <CardShell dialogRef={dialogRef}>
@@ -777,28 +938,34 @@ interface MediaPlayerContentProps {
 /* ═══════════════════════════════ The player ═══════════════════════════════ */
 
 function MediaPlayerContent({ file, onClose, isMinimized, setMinimized }: MediaPlayerContentProps) {
-    /* ── Data ── */
-    const { data: extendedFile, isError: fileError } = useFile(file.id);
+    /* Quality / audio switching keeps the player mounted and preserves the timestamp. */
+    const [activeId, setActiveId] = useState(file.id);
+    const [audioIndex, setAudioIndex] = useState<number | null>(null);
+
+    const { data: extendedFile } = useFile(activeId);
     const { mutate: updateProgress } = useUpdateProgress();
     const details: PlayerFile = (extendedFile as PlayerFile | undefined) ?? file;
-    const detailsReady = !!extendedFile || fileError;
 
-    /* F6: videos sent "as files" are still videos. */
     const isVideo = details.file_type === 'video' || (details.mime_type ?? '').startsWith('video/');
     const container = containerOf(details.file_name, details.mime_type);
     const riskyContainer = ['MKV', 'AVI', 'WMV', 'FLV', 'TS'].includes(container)
         || (details.mime_type ?? '').includes('matroska');
     const subs: SubtitleTrack[] = Array.isArray(details.subtitles) ? details.subtitles.filter(s => s?.url && s?.lang) : [];
+    const renditions: Rendition[] = Array.isArray(details.renditions) ? details.renditions.filter(r => r?.file_id && r?.height) : [];
+    const serverAudio: AudioTrackMeta[] = Array.isArray(details.audio_tracks) ? details.audio_tracks : [];
+    const audioRemux = details.audio_remux === true;
     const thumbSrc = useThumbnail(file.id, details.thumbnail_url);
     const deviceLabel = getDeviceLabel();
 
-    /* ── Playback session (§4.6 / §6.3) ── */
-    const { phase, src, mode, active, error: sessionError, deviceId, retry } = usePlaybackSession(file);
-    const videoMounted = !!src && detailsReady && (phase === 'ready' || phase === 'ended');
+    const { phase, src, mode, active, error: sessionError, deviceId, retry } =
+        usePlaybackSession(activeId, file.stream_url, audioIndex);
+
+    /* INSTANT START: no waiting on /files/{id} — the grid already gave us the basics. */
+    const videoMounted = !!src && (phase === 'ready' || phase === 'ended');
 
     /* ── State ── */
     const [playing, setPlaying] = useState(false);
-    const [sec, setSec] = useState(0);                       // whole seconds only (F14e)
+    const [sec, setSec] = useState(0);
     const [duration, setDuration] = useState(0);
     const [buffering, setBuffering] = useState(true);
     const [bufferedAhead, setBufferedAhead] = useState(0);
@@ -813,8 +980,9 @@ function MediaPlayerContent({ file, onClose, isMinimized, setMinimized }: MediaP
     const [seekFlash, setSeekFlash] = useState<{ dir: 1 | -1; total: number } | null>(null);
     const [toasts, setToasts] = useState<{ id: number; msg: string; kind: ToastKind }[]>([]);
     const [role, setRole] = useState<string>('admin');
-    const [audioTracks, setAudioTracks] = useState<AudioTrackInfo[]>([]);
+    const [nativeAudio, setNativeAudio] = useState<AudioTrackInfo[]>([]);
     const [kickBusy, setKickBusy] = useState<string | null>(null);
+    const [preparing, setPreparing] = useState(false);
     const [fsSupported] = useState(() => typeof document !== 'undefined' && !!document.fullscreenEnabled);
     const [pipSupported] = useState(() => typeof document !== 'undefined' && !!document.pictureInPictureEnabled);
 
@@ -828,6 +996,7 @@ function MediaPlayerContent({ file, onClose, isMinimized, setMinimized }: MediaP
     const scrubberRef = useRef<HTMLDivElement>(null);
     const playBtnRef = useRef<HTMLButtonElement>(null);
     const settingsBtnRef = useRef<HTMLButtonElement>(null);
+    const cropBtnRef = useRef<HTMLButtonElement>(null);
     const backBtnRef = useRef<HTMLButtonElement>(null);
     const replayBtnRef = useRef<HTMLButtonElement>(null);
     const fillRef = useRef<HTMLDivElement>(null);
@@ -845,10 +1014,14 @@ function MediaPlayerContent({ file, onClose, isMinimized, setMinimized }: MediaP
     const dragRef = useRef(false);
     const durationRef = useRef(0);
     const lastPosRef = useRef(0);
+    const lastSavedRef = useRef<{ pos: number; dur: number }>({ pos: -1, dur: -1 });
     const resumePointRef = useRef<number | null>(null);
     const resumeAppliedRef = useRef(false);
+    const metaLoadedRef = useRef(false);
+    const pendingSeekRef = useRef<number | null>(null);
     const seenSrcRef = useRef<string | null>(null);
     const playingRef = useRef(false);
+    const bufferingRef = useRef(true);
     const settingsOpenRef = useRef(false);
     const focusInCtlRef = useRef(false);
     const dialogOpenRef = useRef(false);
@@ -856,21 +1029,27 @@ function MediaPlayerContent({ file, onClose, isMinimized, setMinimized }: MediaP
     const mediaErrorRef = useRef<string | null>(null);
 
     const dialogOpen = phase === 'limited' || phase === 'ended' || !!sessionError || !!mediaError;
-    const effectiveShow = showControls || !playing || settingsOpen || dialogOpen;
+    const effectiveShow = showControls || !playing || buffering || settingsOpen || dialogOpen;
     playingRef.current = playing;
+    bufferingRef.current = buffering;
     settingsOpenRef.current = settingsOpen;
     dialogOpenRef.current = dialogOpen;
     prefsRef.current = prefs;
     mediaErrorRef.current = mediaError;
     durationRef.current = duration || details.duration || 0;
 
-    /* Resume point — computed once from the first fresh file details (F14g). */
-    if (resumePointRef.current === null && detailsReady) {
-        const pos = details.last_pos ?? 0;
-        const dur = details.duration ?? 0;
-        resumePointRef.current =
-            !details.completed && pos > 5 && (dur <= 0 || pos < dur * 0.95) ? pos : 0;
-    }
+    /* Resume point from the grid data we already have — refined when details land. */
+    const computeResume = (f: PlayerFile) => {
+        const pos = f.last_pos ?? 0;
+        const dur = f.duration ?? 0;
+        return !f.completed && pos > 5 && (dur <= 0 || pos < dur * 0.95) ? pos : 0;
+    };
+    if (resumePointRef.current === null) resumePointRef.current = computeResume(file);
+    useEffect(() => {
+        if (!resumeAppliedRef.current && extendedFile && pendingSeekRef.current === null) {
+            resumePointRef.current = computeResume(extendedFile as PlayerFile);
+        }
+    }, [extendedFile]);
 
     /* ── Toasts ── */
     const pushToast = useCallback((msg: string, kind: ToastKind = 'info') => {
@@ -883,14 +1062,17 @@ function MediaPlayerContent({ file, onClose, isMinimized, setMinimized }: MediaP
         toastTimers.current.set(id, tm);
     }, []);
 
-    /* ── Progress persistence (kept: 10 s + pause + unmount + pagehide) ── */
-    const saveProgress = useCallback(() => {
+    /* ── Progress (deduped) ── */
+    const saveProgress = useCallback((force = false) => {
         const v = videoRef.current;
         if (!v || mediaErrorRef.current) return;
         const pos = Math.floor(v.currentTime || 0);
         if (pos <= 0) return;
-        lastPosRef.current = pos;
         const d = Number.isFinite(v.duration) && v.duration > 0 ? Math.floor(v.duration) : 0;
+        const last = lastSavedRef.current;
+        if (!force && Math.abs(pos - last.pos) < 1 && d === last.dur) return;
+        lastSavedRef.current = { pos, dur: d };
+        lastPosRef.current = pos;
         updateProgress({ fileId: file.id, position: pos, duration: d });
     }, [file.id, updateProgress]);
     const saveRef = useRef(saveProgress);
@@ -903,10 +1085,10 @@ function MediaPlayerContent({ file, onClose, isMinimized, setMinimized }: MediaP
         return () => clearInterval(iv);
     }, [saveProgress]);
 
-    useEffect(() => () => saveRef.current(), []);
+    useEffect(() => () => saveRef.current(true), []);
 
     useEffect(() => {
-        const flush = () => saveRef.current();
+        const flush = () => saveRef.current(true);
         const vis = () => { if (document.visibilityState === 'hidden') flush(); };
         window.addEventListener('pagehide', flush);
         document.addEventListener('visibilitychange', vis);
@@ -916,7 +1098,7 @@ function MediaPlayerContent({ file, onClose, isMinimized, setMinimized }: MediaP
         };
     }, []);
 
-    /* ── Bars painted via refs — no 4×/s re-renders (F14e) ── */
+    /* ── Bars via refs ── */
     const syncBars = useCallback(() => {
         const v = videoRef.current;
         if (!v) return;
@@ -947,11 +1129,11 @@ function MediaPlayerContent({ file, onClose, isMinimized, setMinimized }: MediaP
         setSec(p => (p === s ? p : s));
     };
 
-    /* ── Transport (event-driven state, F14f) ── */
+    /* ── Transport ── */
     const togglePlay = useCallback(() => {
         const v = videoRef.current;
         if (!v) return;
-        if (v.paused || v.ended) v.play().catch(() => { /* autoplay policy — center button shows */ });
+        if (v.paused || v.ended) v.play().catch(() => { /* autoplay policy */ });
         else v.pause();
     }, []);
     const playMedia = () => { videoRef.current?.play().catch(() => { /* noop */ }); };
@@ -977,7 +1159,6 @@ function MediaPlayerContent({ file, onClose, isMinimized, setMinimized }: MediaP
         flashTimer.current = setTimeout(() => setSeekFlash(null), 800);
     };
 
-    /* Hold ←/→ : 10 → 30 → 60 s escalation (§7.3 remote map). */
     const holdSeek = (dir: 1 | -1, repeat: boolean) => {
         const now = performance.now();
         let h = holdRef.current;
@@ -992,13 +1173,13 @@ function MediaPlayerContent({ file, onClose, isMinimized, setMinimized }: MediaP
         seekBy(dir * step, h.total);
     };
 
-    /* ── Controls reveal / auto-hide (F14a) ── */
+    /* ── Controls ── */
     const revealControls = useCallback(() => {
         setShowControls(true);
         if (hideTimer.current) clearTimeout(hideTimer.current);
         hideTimer.current = setTimeout(() => {
-            if (playingRef.current && !settingsOpenRef.current && !focusInCtlRef.current
-                && !dragRef.current && !dialogOpenRef.current) {
+            if (playingRef.current && !bufferingRef.current && !settingsOpenRef.current
+                && !focusInCtlRef.current && !dragRef.current && !dialogOpenRef.current) {
                 setShowControls(false);
             }
         }, 4000);
@@ -1014,14 +1195,14 @@ function MediaPlayerContent({ file, onClose, isMinimized, setMinimized }: MediaP
     }, []);
 
     useEffect(() => {
-        if (playing) revealControls();
+        if (playing && !buffering) revealControls();
         else {
             if (hideTimer.current) clearTimeout(hideTimer.current);
             setShowControls(true);
         }
-    }, [playing, revealControls]);
+    }, [playing, buffering, revealControls]);
 
-    /* ── Prefs: apply + persist ── */
+    /* ── Prefs ── */
     const patchPrefs = useCallback((p: Partial<Prefs>) => setPrefs(prev => ({ ...prev, ...p })), []);
 
     const applySubtitleMode = () => {
@@ -1067,33 +1248,104 @@ function MediaPlayerContent({ file, onClose, isMinimized, setMinimized }: MediaP
         pushToast(`Speed ${SPEEDS[ni]}×`, 'info');
     };
 
-    const collectAudioTracks = () => {
-        const v = videoRef.current as (HTMLVideoElement & { audioTracks?: { length: number;[i: number]: { id?: string; label?: string; language?: string; enabled: boolean } } }) | null;
+    /* Crop cycler: fit → fill → stretch → fit */
+    const cycleAspect = () => {
+        const i = ASPECT_ORDER.indexOf(prefsRef.current.aspect);
+        const next = ASPECT_ORDER[(i + 1) % ASPECT_ORDER.length];
+        patchPrefs({ aspect: next });
+        pushToast(`${ASPECT_META[next].label} — ${ASPECT_META[next].hint}`, 'success');
+    };
+
+    /* ── Native audio tracks (Safari exposes them; Chrome does not) ── */
+    const collectNativeAudio = () => {
+        const v = videoRef.current as (HTMLVideoElement & { audioTracks?: { length: number;[i: number]: { label?: string; language?: string; enabled: boolean } } }) | null;
         const at = v?.audioTracks;
         if (at && at.length) {
             const list: AudioTrackInfo[] = [];
             for (let i = 0; i < at.length; i++) {
                 list.push({ index: i, label: at[i].label || at[i].language || `Track ${i + 1}`, enabled: !!at[i].enabled });
             }
-            setAudioTracks(list);
-        } else setAudioTracks([]);
+            setNativeAudio(list);
+        } else setNativeAudio([]);
     };
-    const selectAudio = (index: number) => {
+    const selectNativeAudio = (index: number) => {
         const v = videoRef.current as (HTMLVideoElement & { audioTracks?: { length: number;[i: number]: { enabled: boolean } } }) | null;
         const at = v?.audioTracks;
         if (!at) return;
         for (let i = 0; i < at.length; i++) at[i].enabled = i === index;
-        collectAudioTracks();
+        collectNativeAudio();
     };
 
-    /* ── Fullscreen / PiP (state from events, F14 item 9) ── */
+    /* ── Restart helpers that preserve the timestamp ── */
+    const restartAt = (pos: number) => {
+        pendingSeekRef.current = pos;
+        resumeAppliedRef.current = false;
+        metaLoadedRef.current = false;
+        setBuffering(true);
+        setMediaError(null);
+        setFinished(false);
+    };
+
+    const currentQuality = (() => {
+        if (activeId === file.id) return 1080;
+        return renditions.find(r => r.file_id === activeId)?.height ?? 1080;
+    })();
+
+    const qualities = QUALITIES.map(q => ({
+        ...q,
+        fileId: q.height === 1080 ? file.id : (renditions.find(r => r.height === q.height)?.file_id ?? null),
+    }));
+
+    const switchQuality = (height: number, fileId: number | null) => {
+        if (fileId === null) return;
+        if (fileId === activeId) { closeSettings(); return; }
+        const pos = videoRef.current?.currentTime ?? lastPosRef.current;
+        saveRef.current(true);
+        restartAt(pos);
+        setActiveId(fileId);
+        pushToast(`Quality: ${height === 1080 ? '1080p (Original)' : `${height}p`}`, 'success');
+        closeSettings();
+    };
+
+    const switchServerAudio = (index: number) => {
+        if (!audioRemux) return;
+        const pos = videoRef.current?.currentTime ?? lastPosRef.current;
+        saveRef.current(true);
+        restartAt(pos);
+        setAudioIndex(index);
+        const t = serverAudio.find(x => x.index === index);
+        pushToast(`Audio: ${t?.label || t?.language || `Track ${index + 1}`}`, 'success');
+        closeSettings();
+    };
+
+    const prepareRenditions = async () => {
+        setPreparing(true);
+        try {
+            await api.post(`/files/${file.id}/prepare`, { heights: [480, 720] });
+            pushToast('Preparation started — qualities appear when ready', 'success');
+            closeSettings();
+        } catch (err) {
+            pushToast(
+                axStatus(err) === 404 || axStatus(err) === 405
+                    ? 'Server-side preparation isn’t enabled yet.'
+                    : axStatus(err) === 403
+                        ? 'Only the family account can prepare qualities.'
+                        : 'Could not start preparation. Try again.',
+                'error',
+            );
+        } finally {
+            setPreparing(false);
+        }
+    };
+
+    /* ── Fullscreen / PiP ── */
     const toggleFullscreen = useCallback(() => {
         const el = containerRef.current;
         if (!el) return;
         try {
             if (document.fullscreenElement) void document.exitFullscreen().catch(() => { /* noop */ });
             else if (el.requestFullscreen) void el.requestFullscreen().catch(() => { /* noop */ });
-        } catch { /* TV browsers without the API — player is already fixed inset-0 */ }
+        } catch { /* TV browsers without the API */ }
     }, []);
 
     useEffect(() => {
@@ -1122,25 +1374,18 @@ function MediaPlayerContent({ file, onClose, isMinimized, setMinimized }: MediaP
         };
     }, [videoMounted]);
 
-    /* ── Close / minimize ── */
+    /* ── Close / minimize / settings ── */
     const closePlayer = useCallback(() => {
-        saveProgress();
+        saveRef.current(true);
         try { if (document.fullscreenElement) void document.exitFullscreen().catch(() => { /* noop */ }); } catch { /* noop */ }
         try { if (document.pictureInPictureElement) void document.exitPictureInPicture().catch(() => { /* noop */ }); } catch { /* noop */ }
         onClose();
-    }, [onClose, saveProgress]);
+    }, [onClose]);
 
     const minimize = () => {
         setSettingsOpen(false);
         try { if (document.fullscreenElement) void document.exitFullscreen().catch(() => { /* noop */ }); } catch { /* noop */ }
         setMinimized(true);
-    };
-
-    const handleBack = () => {
-        if (settingsOpen) { closeSettings(); return; }
-        if (dialogOpen) { closePlayer(); return; }
-        if (playing && effectiveShow) { hideControlsNow(); containerRef.current?.focus(); return; }
-        closePlayer();
     };
 
     const openSettings = () => setSettingsOpen(true);
@@ -1149,23 +1394,48 @@ function MediaPlayerContent({ file, onClose, isMinimized, setMinimized }: MediaP
         settingsBtnRef.current?.focus();
     }, []);
 
+    const chooseRate = (r: number) => { setRate(r); pushToast(`Speed ${r}×`, 'success'); closeSettings(); };
+    const chooseSubtitle = (lang: string) => {
+        patchPrefs({ subtitleLang: lang });
+        pushToast(lang === 'off' ? 'Subtitles off' : `Subtitles: ${subs.find(s => s.lang === lang)?.label || lang}`, 'success');
+        closeSettings();
+    };
+    const chooseNativeAudio = (index: number) => {
+        selectNativeAudio(index);
+        pushToast(`Audio: ${nativeAudio.find(t => t.index === index)?.label ?? `Track ${index + 1}`}`, 'success');
+        closeSettings();
+    };
+
+    const handleBack = () => {
+        if (settingsOpen) { closeSettings(); return; }
+        if (dialogOpen) { closePlayer(); return; }
+        if (playing && !buffering && effectiveShow) {
+            hideControlsNow();
+            containerRef.current?.focus();
+            return;
+        }
+        closePlayer();
+    };
+
     /* ── Session reactions ── */
     useEffect(() => {
         if (phase === 'ended') {
             videoRef.current?.pause();
-            saveProgress();
+            saveRef.current(true);
             setMinimized(false);
         }
-    }, [phase, saveProgress, setMinimized]);
+    }, [phase, setMinimized]);
 
     useEffect(() => { if (dialogOpen) setSettingsOpen(false); }, [dialogOpen]);
 
-    /* Re-resume at last position when a session retry produces a new src. */
     useEffect(() => {
         if (!src) return;
         if (seenSrcRef.current && seenSrcRef.current !== src) {
-            resumePointRef.current = lastPosRef.current > 1 ? lastPosRef.current : resumePointRef.current;
+            if (pendingSeekRef.current === null) {
+                resumePointRef.current = lastPosRef.current > 1 ? lastPosRef.current : resumePointRef.current;
+            }
             resumeAppliedRef.current = false;
+            metaLoadedRef.current = false;
         }
         seenSrcRef.current = src;
     }, [src]);
@@ -1176,8 +1446,7 @@ function MediaPlayerContent({ file, onClose, isMinimized, setMinimized }: MediaP
         const v = videoRef.current;
         setMediaError(null);
         if (v) {
-            resumePointRef.current = lastPosRef.current > 1 ? lastPosRef.current : resumePointRef.current;
-            resumeAppliedRef.current = false;
+            restartAt(lastPosRef.current > 1 ? lastPosRef.current : (resumePointRef.current ?? 0));
             v.load();
             v.play().catch(() => { /* noop */ });
         }
@@ -1196,14 +1465,13 @@ function MediaPlayerContent({ file, onClose, isMinimized, setMinimized }: MediaP
         }
     };
 
-    /* Role for the device-limit dialog. */
     useEffect(() => {
         let live = true;
         void fetchRole().then(r => { if (live) setRole(r); });
         return () => { live = false; };
     }, []);
 
-    /* ── Buffering: debounced 300 ms (F14 item 11) ── */
+    /* ── Buffering debounce ── */
     const startBuf = () => {
         if (bufTimer.current) clearTimeout(bufTimer.current);
         bufTimer.current = setTimeout(() => setBuffering(true), 300);
@@ -1213,10 +1481,32 @@ function MediaPlayerContent({ file, onClose, isMinimized, setMinimized }: MediaP
         setBuffering(false);
     };
 
-    /* ── Media element events ── */
+    /* ── Resume applied once metadata AND a position are known ── */
+    const applyResumeOnce = () => {
+        const v = videoRef.current;
+        if (!v || resumeAppliedRef.current || !metaLoadedRef.current) return;
+        resumeAppliedRef.current = true;
+        const forced = pendingSeekRef.current;
+        pendingSeekRef.current = null;
+        const at = forced ?? resumePointRef.current ?? 0;
+        const d = v.duration;
+        if (at > 0 && Number.isFinite(d) && at < d - 2) {
+            v.currentTime = at;
+            setSec(Math.floor(at));
+            if (forced === null) {
+                setResumeToast(true);
+                if (resumeTimer.current) clearTimeout(resumeTimer.current);
+                resumeTimer.current = setTimeout(() => setResumeToast(false), 6500);
+            }
+        }
+    };
+
+    useEffect(() => { applyResumeOnce(); });
+
     const onLoadedMetadata = () => {
         const v = videoRef.current;
         if (!v) return;
+        metaLoadedRef.current = true;
         if (Number.isFinite(v.duration) && v.duration > 0) {
             setDuration(v.duration);
             durationRef.current = v.duration;
@@ -1225,30 +1515,37 @@ function MediaPlayerContent({ file, onClose, isMinimized, setMinimized }: MediaP
         v.muted = prefsRef.current.muted;
         v.playbackRate = prefsRef.current.rate;
         v.defaultPlaybackRate = prefsRef.current.rate;
-        if (!resumeAppliedRef.current) {
-            resumeAppliedRef.current = true;
-            const at = resumePointRef.current ?? 0;
-            if (at > 0 && Number.isFinite(v.duration) && at < v.duration - 2) {
-                v.currentTime = at;
-                setSec(Math.floor(at));
-                setResumeToast(true);
-                if (resumeTimer.current) clearTimeout(resumeTimer.current);
-                resumeTimer.current = setTimeout(() => setResumeToast(false), 6500);
-            }
-        }
+        applyResumeOnce();
         applySubtitleMode();
-        collectAudioTracks();
+        collectNativeAudio();
         syncBars();
-        v.play().catch(() => { /* gesture policy — big play button is visible */ });
+        v.play().catch(() => { /* gesture policy — the big play button shows */ });
     };
 
-    const onMediaError = () => {
+    /* Honest errors: ask the server what actually happened before blaming the codec. */
+    const onMediaError = async () => {
         const code = videoRef.current?.error?.code ?? 0;
+        let serverMsg: string | null = null;
+        if (src && (code === 4 || code === 2)) {
+            try {
+                const r = await fetch(src, { headers: { Range: 'bytes=0-1' } });
+                if (!r.ok) {
+                    if (r.status >= 500) serverMsg = `The server could not read this file from Telegram (HTTP ${r.status}). Your device is fine — try again in a moment.`;
+                    else if (r.status === 404) serverMsg = 'This file is no longer available on the server. It may have been deleted from Telegram.';
+                    else if (r.status === 401 || r.status === 403) serverMsg = 'The stream token expired or another screen took the slot. Try again.';
+                    else if (r.status === 416) serverMsg = 'The server could not serve that part of the file. Try again.';
+                    else serverMsg = `The server refused the stream (HTTP ${r.status}).`;
+                }
+            } catch { /* offline — fall through to the network message */ }
+        }
+        if (!videoRef.current) return;
+
         let msg: string;
-        if (code === 4 && riskyContainer) {
-            msg = `This device can't play ${container} files (often HEVC video or AC3 audio inside). Try a phone or PC, or ask for an MP4 (H.264 + AAC) version.`;
+        if (serverMsg) msg = serverMsg;
+        else if (code === 4 && riskyContainer) {
+            msg = `This device can't decode ${container} (often HEVC video or AC3 audio inside). Try a phone or PC, or ask for an MP4 (H.264 + AAC) version.`;
         } else if (code === 4) {
-            msg = 'Can\u2019t play this file. It may have been removed from Telegram, or this device doesn\u2019t support its format.';
+            msg = 'This device can\u2019t decode this file\u2019s format.';
         } else if (code === 3) {
             msg = 'Playback failed while decoding. The file may be corrupted or use a codec this device can\u2019t handle.';
         } else if (code === 2) {
@@ -1266,6 +1563,7 @@ function MediaPlayerContent({ file, onClose, isMinimized, setMinimized }: MediaP
         setFinished(true);
         const v = videoRef.current;
         if (v && Number.isFinite(v.duration)) {
+            lastSavedRef.current = { pos: Math.floor(v.duration), dur: Math.floor(v.duration) };
             updateProgress({ fileId: file.id, position: Math.floor(v.duration), duration: Math.floor(v.duration) });
         }
     };
@@ -1283,7 +1581,7 @@ function MediaPlayerContent({ file, onClose, isMinimized, setMinimized }: MediaP
         if (v && v.playbackRate !== prefsRef.current.rate) patchPrefs({ rate: v.playbackRate });
     };
 
-    /* ── Focus management ── */
+    /* ── Focus ── */
     useEffect(() => {
         if (!isMinimized) containerRef.current?.focus({ preventScroll: true });
     }, [isMinimized, videoMounted]);
@@ -1292,7 +1590,7 @@ function MediaPlayerContent({ file, onClose, isMinimized, setMinimized }: MediaP
         if (!settingsOpen) return;
         const id = requestAnimationFrame(() => {
             const el = panelRef.current?.querySelector<HTMLElement>('[data-hp-autofocus]')
-                ?? panelRef.current?.querySelector<HTMLElement>('button');
+                ?? panelRef.current?.querySelector<HTMLElement>('button:not([disabled])');
             el?.focus();
         });
         return () => cancelAnimationFrame(id);
@@ -1322,7 +1620,6 @@ function MediaPlayerContent({ file, onClose, isMinimized, setMinimized }: MediaP
         focusInCtlRef.current = !!(to && to.closest?.('[data-hp-controls]'));
     };
 
-    /* ── Tizen media-key registration ── */
     useEffect(() => {
         const tz = (window as unknown as { tizen?: { tvinputdevice?: { registerKey?: (k: string) => void; unregisterKey?: (k: string) => void } } }).tizen;
         const keys = ['MediaPlayPause', 'MediaPlay', 'MediaPause', 'MediaStop', 'MediaRewind', 'MediaFastForward'];
@@ -1330,9 +1627,7 @@ function MediaPlayerContent({ file, onClose, isMinimized, setMinimized }: MediaP
         return () => { try { keys.forEach(k => tz?.tvinputdevice?.unregisterKey?.(k)); } catch { /* noop */ } };
     }, []);
 
-    /* ── Remote / keyboard map (§7.3). No deps array on purpose: the listener
-          always closes over the freshest state — zero stale-closure bugs,
-          re-subscription cost is negligible at ≤ 1 render/s. ── */
+    /* ── Remote / keyboard ── */
     useEffect(() => {
         const nav = (el: HTMLElement | null, dir: 1 | -1) => {
             if (!el) return;
@@ -1348,7 +1643,6 @@ function MediaPlayerContent({ file, onClose, isMinimized, setMinimized }: MediaP
             const k = e.key;
             const code = e.keyCode;
 
-            /* Media keys — work even while minimized. */
             if (k === 'MediaPlayPause' || k === 'MediaTogglePlayPause' || code === 179) { e.preventDefault(); togglePlay(); return; }
             if (k === 'MediaPlay' || code === 415) { e.preventDefault(); playMedia(); return; }
             if (k === 'MediaPause' || code === 19) { e.preventDefault(); pauseMedia(); return; }
@@ -1362,7 +1656,6 @@ function MediaPlayerContent({ file, onClose, isMinimized, setMinimized }: MediaP
             const t = e.target as HTMLElement | null;
             const interactive = !!t?.closest?.('button, a, input, select, textarea, [role="slider"]');
 
-            /* Back cascade: menu → controls → exit (Esc / Backspace / webOS 461 / Tizen 10009). */
             if (k === 'Escape' || k === 'Backspace' || k === 'BrowserBack' || k === 'GoBack' || code === 461 || code === 10009) {
                 e.preventDefault();
                 handleBack();
@@ -1387,7 +1680,6 @@ function MediaPlayerContent({ file, onClose, isMinimized, setMinimized }: MediaP
                 return;
             }
 
-            /* Let focused buttons/sliders activate natively. */
             if (interactive && (k === 'Enter' || k === ' ')) return;
 
             const inBar = !!t?.closest?.('[data-hp-bar]');
@@ -1398,7 +1690,7 @@ function MediaPlayerContent({ file, onClose, isMinimized, setMinimized }: MediaP
             switch (k) {
                 case ' ': case 'k': case 'Enter':
                     e.preventDefault();
-                    if (!effectiveShow) { revealControls(); break; }   // first OK reveals
+                    if (!effectiveShow) { revealControls(); break; }
                     togglePlay();
                     break;
                 case 'ArrowLeft': case 'j':
@@ -1427,17 +1719,14 @@ function MediaPlayerContent({ file, onClose, isMinimized, setMinimized }: MediaP
                     if (onVol) { stepVolume(-0.1); break; }
                     if (inTop) { scrubberRef.current?.focus(); break; }
                     if (onScrub) { playBtnRef.current?.focus(); break; }
-                    if (inBar) { containerRef.current?.focus(); if (playingRef.current) hideControlsNow(); break; }
-                    if (playingRef.current) hideControlsNow();
+                    if (inBar) { containerRef.current?.focus(); if (playingRef.current && !bufferingRef.current) hideControlsNow(); break; }
+                    if (playingRef.current && !bufferingRef.current) hideControlsNow();
                     break;
-                case 'Home':
-                    if (onScrub) { e.preventDefault(); seekTo(0); }
-                    break;
-                case 'End':
-                    if (onScrub) { e.preventDefault(); seekTo(durationRef.current); }
-                    break;
+                case 'Home': if (onScrub) { e.preventDefault(); seekTo(0); } break;
+                case 'End': if (onScrub) { e.preventDefault(); seekTo(durationRef.current); } break;
                 case 'm': case 'M': toggleMute(); break;
                 case 'f': case 'F': toggleFullscreen(); break;
+                case 'c': case 'C': cycleAspect(); break;
                 case '<': case ',': if (k === '<' || e.shiftKey) stepRate(-1); break;
                 case '>': case '.': if (k === '>' || e.shiftKey) stepRate(1); break;
                 default:
@@ -1460,30 +1749,39 @@ function MediaPlayerContent({ file, onClose, isMinimized, setMinimized }: MediaP
         };
     });
 
-    /* ── Timer cleanup ── */
     useEffect(() => () => {
         [hideTimer, bufTimer, flashTimer, resumeTimer].forEach(r => { if (r.current) clearTimeout(r.current); });
         toastTimers.current.forEach(t => clearTimeout(t));
         toastTimers.current.clear();
     }, []);
 
-    /* ── Derived UI ── */
+    /* ── Derived ── */
     const volEff = prefs.muted ? 0 : prefs.volume;
     const VolIcon = prefs.muted || volEff === 0 ? VolumeX : volEff < 0.5 ? Volume1 : Volume2;
-    const preparing = phase === 'starting' || (phase === 'ready' && !videoMounted);
+    const AspectIcon = ASPECT_META[prefs.aspect].icon;
+    const preparingStream = phase === 'starting' || (phase === 'ready' && !src);
     const errorMessage = mediaError ?? sessionError;
     const streamToken = src ? new URL(src).searchParams.get('t') : null;
     const legacyToken = typeof localStorage !== 'undefined' ? localStorage.getItem('access_token') : null;
+    const audioLabel = nativeAudio.length > 1
+        ? (nativeAudio.find(t => t.enabled)?.label ?? 'Default')
+        : serverAudio.length > 1
+            ? (serverAudio.find(t => t.index === (audioIndex ?? 0))?.label
+                ?? serverAudio.find(t => t.default)?.label ?? 'Default')
+            : 'Single track';
 
     const infoRows = [
         { k: 'Container', v: container },
         { k: 'MIME', v: details.mime_type || 'unknown' },
         { k: 'Size', v: fmtBytes(details.file_size) || '—' },
         { k: 'Resolution', v: details.width && details.height ? `${details.width}×${details.height}` : '—' },
+        { k: 'Quality', v: currentQuality === 1080 ? '1080p (Original)' : `${currentQuality}p` },
+        { k: 'Audio', v: audioLabel },
         { k: 'Buffered ahead', v: `${bufferedAhead}s` },
         { k: 'Speed', v: `${prefs.rate}×` },
+        { k: 'Aspect', v: ASPECT_META[prefs.aspect].label },
         { k: 'Device', v: deviceLabel },
-        { k: 'Stream', v: mode === 'signed' ? 'Signed (per-file, per-device)' : 'Legacy (backend not upgraded)' },
+        { k: 'Stream', v: mode === 'signed' ? 'Signed (per-file, per-device)' : 'Legacy' },
     ];
 
     /* ═══════════════════════════════ Render ═══════════════════════════════ */
@@ -1511,11 +1809,8 @@ function MediaPlayerContent({ file, onClose, isMinimized, setMinimized }: MediaP
         >
             <style>{PLAYER_CSS}</style>
 
-            {/* ═════════ Expanded player ═════════ */}
             {!isMinimized && (
                 <div className="absolute inset-0">
-                    {/* Media element — mounted only once details + signed src are ready (F14g).
-                        A single <video> also handles audio-only files (minimal audio fallback). */}
                     {videoMounted && (
                         <video
                             ref={videoRef}
@@ -1545,7 +1840,7 @@ function MediaPlayerContent({ file, onClose, isMinimized, setMinimized }: MediaP
                             onSeeked={endBuf}
                             onPlaying={() => { endBuf(); setPlaying(true); }}
                             onCanPlay={endBuf}
-                            onError={onMediaError}
+                            onError={() => { void onMediaError(); }}
                             onEnded={onEnded}
                             onVolumeChange={onVolumeChange}
                             onRateChange={onRateChange}
@@ -1564,7 +1859,6 @@ function MediaPlayerContent({ file, onClose, isMinimized, setMinimized }: MediaP
                         </video>
                     )}
 
-                    {/* Minimal audio fallback art */}
                     {videoMounted && !isVideo && (
                         <div className="pointer-events-none absolute inset-0 z-10 flex items-center justify-center">
                             <div
@@ -1587,8 +1881,7 @@ function MediaPlayerContent({ file, onClose, isMinimized, setMinimized }: MediaP
                         </div>
                     )}
 
-                    {/* Preparing */}
-                    {preparing && !errorMessage && phase !== 'limited' && (
+                    {preparingStream && !errorMessage && phase !== 'limited' && (
                         <div className="absolute inset-0 z-20 flex flex-col items-center justify-center gap-5">
                             <HearthMark />
                             <div className="flex items-center gap-3 text-[#9db6b1]">
@@ -1599,26 +1892,20 @@ function MediaPlayerContent({ file, onClose, isMinimized, setMinimized }: MediaP
                         </div>
                     )}
 
-                    {/* Buffering — debounced, with seconds-ahead */}
                     {videoMounted && buffering && !errorMessage && !finished && phase === 'ready' && (
                         <div className="pointer-events-none absolute inset-0 z-30 flex items-center justify-center">
                             <div className="hp-scale-in flex flex-col items-center gap-3 rounded-2xl bg-black/60 px-7 py-5">
                                 <Loader2 className="hp-spin h-12 w-12 text-[#2dd4bf]" />
                                 <p className="text-sm font-bold text-[#e8f1ef]" aria-live="polite">Buffering…</p>
-                                {bufferedAhead > 0 && (
-                                    <p className="font-mono text-xs text-[#9db6b1]">+{bufferedAhead}s ahead</p>
-                                )}
+                                {bufferedAhead > 0 && <p className="font-mono text-xs text-[#9db6b1]">+{bufferedAhead}s ahead</p>}
                             </div>
                         </div>
                     )}
 
-                    {/* Seek flash (±10/30/60 accumulation) */}
                     {seekFlash && (
                         <div className={`pointer-events-none absolute top-1/2 z-30 -translate-y-1/2 ${seekFlash.dir < 0 ? 'left-[10%]' : 'right-[10%]'}`}>
                             <div className="hp-scale-in flex flex-col items-center gap-1 rounded-2xl bg-black/65 px-5 py-3">
-                                {seekFlash.dir < 0
-                                    ? <Rewind className="h-9 w-9 text-[#5eead4]" />
-                                    : <FastForward className="h-9 w-9 text-[#5eead4]" />}
+                                {seekFlash.dir < 0 ? <Rewind className="h-9 w-9 text-[#5eead4]" /> : <FastForward className="h-9 w-9 text-[#5eead4]" />}
                                 <span className="font-mono text-sm font-bold text-[#e8f1ef]">
                                     {seekFlash.dir < 0 ? '−' : '+'}{seekFlash.total}s
                                 </span>
@@ -1626,26 +1913,22 @@ function MediaPlayerContent({ file, onClose, isMinimized, setMinimized }: MediaP
                         </div>
                     )}
 
-                    {/* Center transport — visible while paused; ±10 sides on touch */}
                     {videoMounted && phase === 'ready' && !playing && !buffering && !finished && !errorMessage && (
                         <div className="absolute left-1/2 top-1/2 z-30 flex -translate-x-1/2 -translate-y-1/2 items-center gap-6 sm:gap-8">
                             <button
-                                type="button" aria-label="Back 10 seconds"
-                                onClick={() => seekBy(-10)}
+                                type="button" aria-label="Back 10 seconds" onClick={() => seekBy(-10)}
                                 className="hp-focus hidden h-14 w-14 items-center justify-center rounded-full bg-white/10 text-white/80 transition-all duration-150 hover:bg-white/20 hover:text-white [@media(pointer:coarse)]:flex"
                             >
                                 <Rewind className="h-7 w-7" />
                             </button>
                             <button
-                                type="button" aria-label="Play"
-                                onClick={togglePlay}
+                                type="button" aria-label="Play" onClick={togglePlay}
                                 className="hp-focus hp-glow flex h-20 w-20 items-center justify-center rounded-full bg-[#2dd4bf] text-[#04110f] transition-transform duration-150 hover:scale-105 hover:bg-[#5eead4] active:scale-95"
                             >
                                 <Play className="ml-1 h-10 w-10" />
                             </button>
                             <button
-                                type="button" aria-label="Forward 10 seconds"
-                                onClick={() => seekBy(10)}
+                                type="button" aria-label="Forward 10 seconds" onClick={() => seekBy(10)}
                                 className="hp-focus hidden h-14 w-14 items-center justify-center rounded-full bg-white/10 text-white/80 transition-all duration-150 hover:bg-white/20 hover:text-white [@media(pointer:coarse)]:flex"
                             >
                                 <FastForward className="h-7 w-7" />
@@ -1653,9 +1936,8 @@ function MediaPlayerContent({ file, onClose, isMinimized, setMinimized }: MediaP
                         </div>
                     )}
 
-                    {/* Finished */}
                     {finished && !errorMessage && (
-                        <div className="absolute inset-0 z-40 flex items-center justify-center bg-black/55 p-6">
+                        <div className="pointer-events-auto absolute inset-0 z-40 flex items-center justify-center bg-black/55 p-6">
                             <div className="hp-scale-in w-full max-w-sm rounded-2xl border border-[#1a2524] bg-[#0e1514] p-6 text-center shadow-[0_30px_80px_-20px_rgba(0,0,0,0.9)]">
                                 <span className="mx-auto mb-4 flex h-14 w-14 items-center justify-center rounded-full border border-[#2dd4bf]/40 bg-[#2dd4bf]/15">
                                     <Check className="h-7 w-7 text-[#2dd4bf]" />
@@ -1676,7 +1958,6 @@ function MediaPlayerContent({ file, onClose, isMinimized, setMinimized }: MediaP
                         </div>
                     )}
 
-                    {/* Resume toast (F14g) */}
                     {resumeToast && !settingsOpen && !dialogOpen && phase === 'ready' && (
                         <div
                             data-hp-controls
@@ -1696,30 +1977,30 @@ function MediaPlayerContent({ file, onClose, isMinimized, setMinimized }: MediaP
                         </div>
                     )}
 
-                    {/* ═════ Controls overlay (top + bottom) ═════ */}
+                    {/* Controls overlay — clicks pass through to the picture */}
                     {videoMounted && phase === 'ready' && !dialogOpen && !finished && (
                         <div
                             ref={ctlWrapRef}
                             data-hp-controls
-                            className={`absolute inset-0 z-30 transition-opacity duration-200 ${
-                                effectiveShow ? 'visible opacity-100' : 'invisible pointer-events-none opacity-0'
+                            className={`pointer-events-none absolute inset-0 z-30 transition-opacity duration-200 ${
+                                effectiveShow ? 'visible opacity-100' : 'invisible opacity-0'
                             }`}
                         >
-                            {/* Top bar */}
                             <div
                                 data-hp-top
-                                className="absolute inset-x-0 top-0 flex items-start justify-between gap-4 bg-gradient-to-b from-black/85 via-black/40 to-transparent px-[3.5%] pb-12"
+                                className="pointer-events-auto absolute inset-x-0 top-0 flex items-start justify-between gap-4 bg-gradient-to-b from-black/85 via-black/40 to-transparent px-[3.5%] pb-12"
                                 style={{ paddingTop: 'max(1rem, env(safe-area-inset-top))' }}
                             >
                                 <div className="flex min-w-0 items-center gap-3">
-                                    <IconBtn label="Back" refEl={backBtnRef} onClick={handleBack}>
+                                    <IconBtn label="Back to library" refEl={backBtnRef} onClick={closePlayer}>
                                         <ArrowLeft className="h-6 w-6" />
                                     </IconBtn>
                                     <div className="min-w-0">
                                         <h1 className="truncate text-lg font-bold text-white md:text-xl">{file.file_name}</h1>
                                         <p className="truncate text-xs font-medium text-[#9db6b1]">
                                             {deviceLabel} · {container}{details.file_size ? ` · ${fmtBytes(details.file_size)}` : ''}
-                                            {riskyContainer && <span className="ml-2 rounded bg-[#fbbf24]/15 px-1.5 py-0.5 font-bold text-[#fbbf24]">may not play on all TVs</span>}
+                                            {currentQuality !== 1080 && ` · ${currentQuality}p`}
+                                            
                                         </p>
                                     </div>
                                 </div>
@@ -1736,16 +2017,14 @@ function MediaPlayerContent({ file, onClose, isMinimized, setMinimized }: MediaP
                                 </div>
                             </div>
 
-                            {/* Bottom bar */}
                             <div
-                                className="absolute inset-x-0 bottom-0 bg-gradient-to-t from-black/95 via-black/70 to-transparent px-[3.5%] pt-12"
+                                className="pointer-events-auto absolute inset-x-0 bottom-0 bg-gradient-to-t from-black/95 via-black/70 to-transparent px-[3.5%] pt-12"
                                 style={{ paddingBottom: 'max(1.25rem, env(safe-area-inset-bottom))' }}
                             >
                                 <div className="flex items-center gap-3 sm:gap-4">
                                     <span className="min-w-[52px] font-mono text-sm font-semibold text-white/90">{fmtTime(sec)}</span>
                                     <Scrubber
-                                        duration={duration}
-                                        sec={sec}
+                                        duration={duration} sec={sec}
                                         fillRef={fillRef} bufRef={bufRef} thumbRef={thumbRef} scrubberRef={scrubberRef}
                                         onSeek={seekTo}
                                         onDragState={(d) => { dragRef.current = d; }}
@@ -1758,23 +2037,15 @@ function MediaPlayerContent({ file, onClose, isMinimized, setMinimized }: MediaP
                                         <IconBtn label={playing ? 'Pause' : 'Play'} refEl={playBtnRef} onClick={togglePlay}>
                                             {playing ? <Pause className="h-6 w-6" /> : <Play className="h-6 w-6" />}
                                         </IconBtn>
-                                        <IconBtn label="Back 10 seconds" onClick={() => seekBy(-10)}>
-                                            <Rewind className="h-5 w-5" />
-                                        </IconBtn>
-                                        <IconBtn label="Forward 10 seconds" onClick={() => seekBy(10)}>
-                                            <FastForward className="h-5 w-5" />
-                                        </IconBtn>
+                                        <IconBtn label="Back 10 seconds" onClick={() => seekBy(-10)}><Rewind className="h-5 w-5" /></IconBtn>
+                                        <IconBtn label="Forward 10 seconds" onClick={() => seekBy(10)}><FastForward className="h-5 w-5" /></IconBtn>
                                         <span className="mx-1 hidden h-6 w-px bg-white/15 sm:block" />
                                         <IconBtn label={prefs.muted ? 'Unmute' : 'Mute'} onClick={toggleMute} active={prefs.muted}>
                                             <VolIcon className="h-5 w-5" />
                                         </IconBtn>
-                                        <IconBtn label="Volume down" onClick={() => stepVolume(-0.1)}>
-                                            <Minus className="h-4 w-4" />
-                                        </IconBtn>
+                                        <IconBtn label="Volume down" onClick={() => stepVolume(-0.1)}><Minus className="h-4 w-4" /></IconBtn>
                                         <VolumeBar value={prefs.volume} muted={prefs.muted} onChange={setVolumeLevel} />
-                                        <IconBtn label="Volume up" onClick={() => stepVolume(0.1)}>
-                                            <Plus className="h-4 w-4" />
-                                        </IconBtn>
+                                        <IconBtn label="Volume up" onClick={() => stepVolume(0.1)}><Plus className="h-4 w-4" /></IconBtn>
                                     </div>
 
                                     <div className="flex items-center gap-1 sm:gap-1.5">
@@ -1783,14 +2054,19 @@ function MediaPlayerContent({ file, onClose, isMinimized, setMinimized }: MediaP
                                                 +{bufferedAhead}s
                                             </span>
                                         )}
+                                        {/* CROP — cycles fit → fill → stretch, sits left of the gear */}
+                                        <IconBtn
+                                            label={`Crop / aspect: ${ASPECT_META[prefs.aspect].label} — click to change`}
+                                            refEl={cropBtnRef} onClick={cycleAspect} active={prefs.aspect !== 'fit'}
+                                        >
+                                            <AspectIcon className="h-5 w-5" />
+                                        </IconBtn>
                                         <IconBtn
                                             label="Settings" refEl={settingsBtnRef} onClick={openSettings}
-                                            active={settingsOpen || prefs.rate !== 1 || prefs.aspect !== 'fit'}
+                                            active={settingsOpen || prefs.rate !== 1}
                                         >
                                             <Settings className="h-5 w-5" />
-                                            {(prefs.rate !== 1 || prefs.aspect !== 'fit') && (
-                                                <span className="absolute right-1.5 top-1.5 h-2 w-2 rounded-full bg-[#2dd4bf]" />
-                                            )}
+                                            {prefs.rate !== 1 && <span className="absolute right-1.5 top-1.5 h-2 w-2 rounded-full bg-[#2dd4bf]" />}
                                         </IconBtn>
                                         {pipSupported && isVideo && !isTV() && (
                                             <IconBtn label="Picture in picture" onClick={() => { void togglePiP(); }} active={isPiP}>
@@ -1808,23 +2084,30 @@ function MediaPlayerContent({ file, onClose, isMinimized, setMinimized }: MediaP
                         </div>
                     )}
 
-                    {/* Settings panel */}
                     {settingsOpen && !dialogOpen && (
                         <SettingsPanel
                             panelRef={panelRef}
                             onClose={closeSettings}
                             prefs={prefs}
-                            onRate={setRate}
-                            onAspect={(a) => patchPrefs({ aspect: a })}
-                            onSubtitle={(lang) => { patchPrefs({ subtitleLang: lang }); }}
+                            onRate={chooseRate}
+                            qualities={qualities}
+                            currentQuality={currentQuality}
+                            onQuality={switchQuality}
+                            canPrepare={role === 'admin'}
+                            onPrepare={() => { void prepareRenditions(); }}
+                            preparing={preparing}
+                            nativeAudio={nativeAudio}
+                            serverAudio={serverAudio}
+                            audioRemux={audioRemux}
+                            currentAudio={audioIndex ?? (serverAudio.find(t => t.default)?.index ?? 0)}
+                            onNativeAudio={chooseNativeAudio}
+                            onServerAudio={switchServerAudio}
                             subs={subs}
-                            audioTracks={audioTracks}
-                            onAudio={selectAudio}
+                            onSubtitle={chooseSubtitle}
                             info={infoRows}
                         />
                     )}
 
-                    {/* Blocking cards */}
                     {phase === 'limited' && (
                         <DeviceLimitDialog
                             dialogRef={dialogRef} active={active} role={role} busy={kickBusy}
@@ -1840,16 +2123,13 @@ function MediaPlayerContent({ file, onClose, isMinimized, setMinimized }: MediaP
                 </div>
             )}
 
-            {/* ═════════ Minimized bar (kept feature) ═════════ */}
             {isMinimized && (
                 <div className="relative flex h-full items-center gap-2 px-3 sm:gap-3 sm:px-6">
                     <div className="absolute inset-x-0 top-0 h-0.5 bg-white/10">
                         <div ref={miniFillRef} className="h-full origin-left bg-gradient-to-r from-[#0d9488] to-[#5eead4]" style={{ transform: 'scaleX(0)' }} />
                     </div>
                     <button
-                        type="button"
-                        onClick={() => setMinimized(false)}
-                        aria-label="Expand player"
+                        type="button" onClick={() => setMinimized(false)} aria-label="Expand player"
                         className="hp-focus flex min-w-0 flex-1 items-center gap-3 rounded-xl p-1.5 text-left"
                     >
                         <span className="flex h-12 w-12 shrink-0 items-center justify-center overflow-hidden rounded-lg border border-[#1a2524] bg-[#141d1c]">
@@ -1872,13 +2152,13 @@ function MediaPlayerContent({ file, onClose, isMinimized, setMinimized }: MediaP
                         </button>
                         <IconBtn label="Forward 10 seconds" onClick={() => seekBy(10)}><FastForward className="h-5 w-5" /></IconBtn>
                         <span className="mx-1 h-6 w-px bg-white/10" />
+                        <IconBtn label="Crop / aspect" onClick={cycleAspect} active={prefs.aspect !== 'fit'}><AspectIcon className="h-5 w-5" /></IconBtn>
                         <IconBtn label="Expand" onClick={() => setMinimized(false)}><ChevronUp className="h-5 w-5" /></IconBtn>
                         <IconBtn label="Close player" onClick={closePlayer}><X className="h-5 w-5" /></IconBtn>
                     </div>
                 </div>
             )}
 
-            {/* ═════════ Toasts ═════════ */}
             <div className="pointer-events-none absolute left-1/2 top-16 z-[140] flex -translate-x-1/2 flex-col items-center gap-2" role="status" aria-live="polite">
                 {toasts.map(t => (
                     <div

@@ -169,7 +169,7 @@ export default function Sidebar({ enabled = false, isOpen, open, onClose }: Side
                 setRole(r === 'guest' ? 'guest' : 'admin');
             })
             .catch(() => { if (live) setRole('admin'); });
-        api.get('/auth/bot-info')
+        api.get('/auth/bot/info')
             .then(({ data }) => {
                 if (!live) return;
                 const d = data as { bot_username?: string; username?: string; bot?: { username?: string } };

@@ -1,9 +1,11 @@
 """
 Database setup with SQLAlchemy async support.
 """
-from sqlalchemy.ext.asyncio import create_async_engine, AsyncSession, async_sessionmaker
-from sqlalchemy.orm import DeclarativeBase
+
 from sqlalchemy.engine import make_url
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
+from sqlalchemy.orm import DeclarativeBase
+
 from .config import get_settings
 
 settings = get_settings()
@@ -30,12 +32,13 @@ elif url.drivername == "sqlite":
 
 # Create the engine with Neon-safe pool sizes
 engine = create_async_engine(
-    url, 
+    url,
     echo=False,
-    pool_pre_ping=True,
-    pool_recycle=1800,  # Recycle connections every 30 minutes
-    pool_size=5,        # Reduced for Neon free tier limits
-    max_overflow=3,     # Reduced for Neon free tier limits
+    pool_pre_ping=True,      # Detects stale connections before use
+    pool_recycle=1800,        # Recycle every 30 min (Neon free tier timeout)
+    pool_size=3,              # Reduced: Neon free tier limits concurrent connections
+    max_overflow=2,           # 2 extra on burst only
+    pool_timeout=10,          # Fail fast instead of hanging forever
     connect_args=connect_args
 )
 
