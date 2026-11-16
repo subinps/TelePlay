@@ -1,13 +1,14 @@
 """
 Database setup with SQLAlchemy async support.
 """
-
+import logging
 from sqlalchemy.engine import make_url
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 from sqlalchemy.orm import DeclarativeBase
 
 from .config import get_settings
 
+logger = logging.getLogger(__name__)
 settings = get_settings()
 
 # Convert database URL for async drivers and handle query params
@@ -26,6 +27,10 @@ if url.drivername.startswith("postgresql"):
     # Needed if DATABASE_URL uses Neon's pooled host (prevents prepared statement errors)
     connect_args["statement_cache_size"] = 0
     connect_args["prepared_statement_cache_size"] = 0
+    
+    # DNS resolution timeout for Windows (prevents gaierror hangs)
+    connect_args["connect_timeout"] = 5
+    connect_args["command_timeout"] = 10
 
 elif url.drivername == "sqlite":
     url = url.set(drivername="sqlite+aiosqlite")
@@ -52,6 +57,10 @@ async def get_db():
     async with async_session() as session:
         try:
             yield session
+        except Exception as e:
+            logger.warning("Database session error: %s", e)
+            await session.rollback()
+            raise
         finally:
             await session.close()
 

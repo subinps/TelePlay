@@ -30,4 +30,4 @@ aiofiles>=23.2.0
 # Rate Limiting
 slowapi>=0.1.9
 
-
+psutil==5.9.8

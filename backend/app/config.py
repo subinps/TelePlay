@@ -53,7 +53,7 @@ class Settings(BaseSettings):
     server_port: int = 8000
     
     # Concurrency / Playback limits
-    telegram_client_concurrency: int = 4      # Parallel 1 MiB requests PER BOT
+    telegram_client_concurrency: int = 2      # Parallel 1 MiB requests PER BOT
     max_playback_devices: int = 2             # Max simultaneous video streams
     stream_token_hours: int = 12
     guest_pin_hours: int = 24
@@ -73,6 +73,6 @@ class Settings(BaseSettings):
         env_file_encoding = "utf-8"
         extra = "ignore"
 
-@lru_cache()
+@lru_cache
 def get_settings() -> Settings:
     return Settings()

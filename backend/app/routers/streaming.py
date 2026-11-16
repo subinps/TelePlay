@@ -3,7 +3,7 @@ backend/app/routers/streaming.py — HTTP layer for media playback.
 Hearth upgrade plan §4.6 / §4.7 / §8.3.
 
 Includes:
-  · P2 byte cache for instant cold starts (first 512 KB cached in RAM)
+  · P2 byte cache for instant cold starts (first 256 KB cached in RAM)
   · 16 MB window cap for safe seeking
   · Signed per-file, per-device stream tokens
   · HEAD support for TV browsers
@@ -16,20 +16,18 @@ import logging
 import re
 import time
 from dataclasses import dataclass
-from typing import Optional, Tuple
 from urllib.parse import quote
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response
 from fastapi.responses import StreamingResponse
 from sqlalchemy import select
 
-from ..byte_cache import HEAD_CACHE_SIZE, cache_head, get_cached_head, get_cache_stats
+from .. import telegram
+from ..auth import get_current_user, verify_stream_token
+from ..byte_cache import HEAD_CACHE_SIZE, cache_head, get_cached_head
 from ..database import async_session
 from ..models import File, User
-from ..auth import get_current_user, verify_stream_token
 from ..playback import limiter
-from .. import telegram
-from ..telegram import get_message_from_channel
 from ..streaming import (
     MessageGone,
     StreamUnavailable,
@@ -38,6 +36,7 @@ from ..streaming import (
     prepare_stream,
     stream_file as stream_file_generator,
 )
+from ..telegram import get_message_from_channel
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/stream", tags=["Streaming"])
@@ -52,7 +51,7 @@ MAX_WINDOW = 16 * 1024 * 1024
 _RANGE_RE = re.compile(r"^bytes=(\d*)-(\d*)$")
 
 
-def parse_range_header(range_header: Optional[str], file_size: int) -> Tuple[int, int, int]:
+def parse_range_header(range_header: str | None, file_size: int) -> tuple[int, int, int]:
     """Returns (start, end, status). Supports open-ended and suffix ranges (bytes=-500)."""
     if file_size <= 0:
         return 0, 0, 416
@@ -87,10 +86,10 @@ class FileMeta:
     mime: str
     name: str
     message_id: int
-    thumb_unique: Optional[str]
+    thumb_unique: str | None
 
 
-_meta: dict[int, Tuple[float, FileMeta]] = {}
+_meta: dict[int, tuple[float, FileMeta]] = {}
 META_TTL = 300
 
 _thumbs: dict[int, bytes] = {}
@@ -99,7 +98,7 @@ THUMB_CACHE_MAX = 64
 THUMB_MISS_TTL = 60
 
 
-async def get_meta(file_id: int) -> Optional[FileMeta]:
+async def get_meta(file_id: int) -> FileMeta | None:
     hit = _meta.get(file_id)
     if hit and time.monotonic() - hit[0] < META_TTL:
         return hit[1]
@@ -129,7 +128,7 @@ def _heal_size(file_id: int, meta: FileMeta, real_size: int) -> FileMeta:
     return meta
 
 
-def invalidate_meta(file_id: int, message_id: Optional[int] = None) -> None:
+def invalidate_meta(file_id: int, message_id: int | None = None) -> None:
     _meta.pop(file_id, None)
     _thumbs.pop(file_id, None)
     _thumb_miss.pop(file_id, None)
@@ -138,8 +137,7 @@ def invalidate_meta(file_id: int, message_id: Optional[int] = None) -> None:
 
 
 # ───────────────────────── shared resolution ─────────────────────────
-
-async def _resolve(request: Request, file_id: int, t: Optional[str], download: int = 0):
+async def _resolve(request: Request, file_id: int, t: str | None, download: int = 0):
     """Authenticate, (re)register the device, resolve the message, work out the byte range."""
     if not t:
         raise HTTPException(401, "Missing stream token. Start playback via /api/playback/start.")
@@ -209,13 +207,9 @@ def _headers(meta: FileMeta, start: int, end: int, status: int, download: int) -
 
 # ───────────────────────── P2: Byte cache helpers ─────────────────────────
 
-async def _populate_cache_from_telegram(file_id: int, message_id: int) -> None:
-    """Fetch the first 512 KB from Telegram and cache it (runs in background)."""
+async def _populate_cache_from_context(file_id: int, ctx: list) -> None:
+    """Fetch the first HEAD_CACHE_SIZE bytes using an existing Telegram context (runs in background)."""
     try:
-        ctx = await prepare_stream(message_id)
-        if not ctx:
-            return
-        
         chunks = []
         total = 0
         async for chunk in stream_file_generator(ctx, 0, HEAD_CACHE_SIZE - 1):
@@ -228,11 +222,11 @@ async def _populate_cache_from_telegram(file_id: int, message_id: int) -> None:
             head_data = b''.join(chunks)
             cache_head(file_id, head_data)
             logger.info("P2: Cached %d bytes for file_id=%d", len(head_data), file_id)
-    except Exception as e:
+    except Exception as e: # noqa: BLE001
         logger.warning("P2: Failed to cache head for file_id=%d: %s", file_id, e)
 
 
-def _try_cache_hit(file_id: int, range_header: Optional[str], meta: FileMeta) -> Optional[Response]:
+def _try_cache_hit(file_id: int, range_header: str | None, meta: FileMeta) -> Response | None:
     """Check if this is a head request we can serve from cache. Returns Response or None."""
     if not range_header:
         return None
@@ -263,7 +257,7 @@ def _try_cache_hit(file_id: int, range_header: Optional[str], meta: FileMeta) ->
     
     data = cached[start_byte:end_byte + 1]
     
-    logger.info("P2: Cache HIT for file_id=%d bytes=%d-%d (%d bytes)", 
+    logger.info("⚡ P2: Cache HIT for file_id=%d bytes=%d-%d (%d bytes)", 
                 file_id, start_byte, end_byte, len(data))
     
     return Response(
@@ -286,7 +280,7 @@ def _try_cache_hit(file_id: int, range_header: Optional[str], meta: FileMeta) ->
 async def stream_file(
     file_id: int,
     request: Request,
-    t: Optional[str] = Query(None, description="Signed per-file, per-device stream token"),
+    t: str | None = Query(None, description="Signed per-file, per-device stream token"),
     download: int = Query(0),
 ):
     # P2: Try cache first for head requests (instant start!)
@@ -318,8 +312,9 @@ async def stream_file(
 
     # P2: After first successful stream of the head, populate the cache
     # Only cache if this is a head request (bytes 0-*)
+    # OPTIMIZATION: Reuse the existing ctx instead of creating a new Telegram stream
     if start == 0:
-        asyncio.create_task(_populate_cache_from_telegram(file_id, meta.message_id))
+        asyncio.create_task(_populate_cache_from_context(file_id, ctx))
 
     return StreamingResponse(body(), status_code=status, headers=_headers(meta, start, end, status, download))
 
@@ -328,7 +323,7 @@ async def stream_file(
 async def stream_file_head(
     file_id: int,
     request: Request,
-    t: Optional[str] = Query(None),
+    t: str | None = Query(None),
     download: int = Query(0),
 ):
     """Some TV browsers probe with HEAD before playing."""
@@ -341,7 +336,7 @@ async def stream_file_head(
 # ───────────────────────── thumbnails (header-auth) ─────────────────────────
 
 @router.get("/{file_id}/thumbnail")
-async def get_thumbnail(file_id: int, current_user: User = Depends(get_current_user)):
+async def get_thumbnail(file_id: int, current_user: User = Depends(get_current_user)):  # noqa: B008
     cached = _thumbs.get(file_id)
     if cached is not None:
         _thumbs[file_id] = _thumbs.pop(file_id)      # LRU touch
@@ -359,7 +354,7 @@ async def get_thumbnail(file_id: int, current_user: User = Depends(get_current_u
 
     try:
         message = await get_message_from_channel(meta.message_id)
-    except Exception as e:
+    except Exception as e: # noqa: BLE001
         logger.warning("thumbnail lookup failed file=%s: %s", file_id, e)
         raise HTTPException(503, detail={"code": "STREAM_UNAVAILABLE"})
 
@@ -375,7 +370,7 @@ async def get_thumbnail(file_id: int, current_user: User = Depends(get_current_u
 
     try:
         buf = await telegram.tg_client.download_media(thumbs[-1].file_id, in_memory=True)
-    except Exception as e:
+    except Exception as e: # noqa: BLE001
         logger.warning("thumbnail download failed file=%s: %s", file_id, e)
         raise HTTPException(503, detail={"code": "STREAM_UNAVAILABLE"})
 

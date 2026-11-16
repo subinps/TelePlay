@@ -245,11 +245,7 @@ function stopPlaybackRequest(deviceId: string) {
     } catch { /* best effort */ }
 }
 
-/* ═══════════════════ P1 · Pre-warm (import from the grid) ═══════════════════
- * Focus/hover a card → the session, the Telegram message and the cross-DC media
- * session are all warmed before OK is pressed. Re-starting the SAME device never
- * consumes a second slot, so the 2-screen limit is unaffected.
- * ═══════════════════════════════════════════════════════════════════════════ */
+/* ═══════════════════ P1 · Pre-warm (import from the grid) ═══════════════════ */
 
 interface PrewarmEntry { src: string; mode: 'signed' | 'legacy'; beatSec: number; at: number }
 const PREWARM_TTL = 4 * 60 * 1000;
@@ -276,7 +272,6 @@ export function clearPrewarm(): void {
     if (prewarmTimer) { clearTimeout(prewarmTimer); prewarmTimer = null; }
 }
 
-/** Debounced: only the card the user settles on is warmed. */
 export function prewarmPlayback(file: TelegramFile): void {
     if (!file?.id || freshPrewarm(file.id)) return;
     prewarmTarget = file.id;
@@ -307,7 +302,6 @@ async function doPrewarm(file: TelegramFile): Promise<void> {
             if (oldest === undefined) break;
             prewarmCache.delete(oldest);
         }
-        // Two bytes: warms the Telegram message, the DC media session and the head cache.
         void fetch(entry.src, { headers: { Range: 'bytes=0-1' } }).catch(() => { /* best effort */ });
     } catch {
         /* pre-warm is opportunistic — never surface an error for it */
@@ -326,7 +320,7 @@ interface PlaybackSession {
     retry: () => void;
 }
 
-function usePlaybackSession(fileId: number, legacyUrl: string | null | undefined, audioIndex: number | null): PlaybackSession {
+function usePlaybackSession(fileId: number, legacyUrl: string | null | undefined, audioIndex: number | null, isPlaying: boolean): PlaybackSession {
     const [attempt, setAttempt] = useState(0);
     const [phase, setPhase] = useState<SessionPhase>('starting');
     const [src, setSrc] = useState<string | null>(null);
@@ -345,7 +339,6 @@ function usePlaybackSession(fileId: number, legacyUrl: string | null | undefined
         const withAudio = (url: string) =>
             audioIndex && audioIndex > 0 ? `${url}${url.includes('?') ? '&' : '?'}audio=${audioIndex}` : url;
 
-        // A pre-warmed session means zero network wait before <video> mounts.
         const warm = audioIndex ? null : takePrewarm(fileId);
         if (warm) {
             setMode(warm.mode);
@@ -404,6 +397,10 @@ function usePlaybackSession(fileId: number, legacyUrl: string | null | undefined
 
     useEffect(() => {
         if (mode !== 'signed' || phase !== 'ready') return;
+        
+        // Only heartbeat when actually playing (not paused)
+        if (!isPlaying) return;
+        
         const iv = setInterval(async () => {
             try {
                 await api.post('/playback/heartbeat', { device_id: deviceId, file_id: fileId });
@@ -411,8 +408,9 @@ function usePlaybackSession(fileId: number, legacyUrl: string | null | undefined
                 if (axStatus(err) === 410) setPhase('ended');
             }
         }, beatSec * 1000);
+        
         return () => clearInterval(iv);
-    }, [mode, phase, beatSec, fileId, deviceId]);
+    }, [mode, phase, beatSec, fileId, deviceId, isPlaying]);
 
     const retry = useCallback(() => setAttempt(a => a + 1), []);
     return { phase, src, mode, active, error, deviceId, retry };
@@ -657,7 +655,6 @@ function SettingsPanel({
                 </div>
 
                 <div className="hp-scroll flex-1 space-y-7 overflow-y-auto px-5 py-5">
-                    {/* 1 · SPEED */}
                     <section>
                         <SectionTitle icon={Gauge}>Speed</SectionTitle>
                         <div className="flex flex-wrap gap-2">
@@ -669,7 +666,6 @@ function SettingsPanel({
                         </div>
                     </section>
 
-                    {/* 2 · QUALITY */}
                     <section>
                         <SectionTitle icon={Layers}>Quality</SectionTitle>
                         <div className="grid grid-cols-3 gap-2">
@@ -717,7 +713,6 @@ function SettingsPanel({
                         )}
                     </section>
 
-                    {/* 3 · AUDIO */}
                     <section>
                         <SectionTitle icon={Music}>Audio</SectionTitle>
                         {nativeAudio.length > 1 ? (
@@ -748,8 +743,8 @@ function SettingsPanel({
                                 </div>
                                 {!audioRemux && (
                                     <Note tone="warn">
-                                        This browser can’t switch embedded audio tracks itself. Choosing another track needs
-                                        the server to remux it (video untouched, audio converted) — that pipeline isn’t enabled yet.
+                                        This browser cannot switch embedded audio tracks itself. Choosing another track needs
+                                        the server to remux it (video untouched, audio converted) — that pipeline is not enabled yet.
                                     </Note>
                                 )}
                             </>
@@ -758,7 +753,6 @@ function SettingsPanel({
                         )}
                     </section>
 
-                    {/* 4 · SUBTITLES */}
                     <section>
                         <SectionTitle icon={Subtitles}>Subtitles</SectionTitle>
                         {subs.length > 0 ? (
@@ -777,7 +771,6 @@ function SettingsPanel({
                         )}
                     </section>
 
-                    {/* 5 · INFO (bottom) */}
                     <section>
                         <SectionTitle icon={Info}>Info</SectionTitle>
                         <dl className="rounded-xl border border-[#1a2524] bg-[#141d1c] px-4 py-2">
@@ -938,7 +931,6 @@ interface MediaPlayerContentProps {
 /* ═══════════════════════════════ The player ═══════════════════════════════ */
 
 function MediaPlayerContent({ file, onClose, isMinimized, setMinimized }: MediaPlayerContentProps) {
-    /* Quality / audio switching keeps the player mounted and preserves the timestamp. */
     const [activeId, setActiveId] = useState(file.id);
     const [audioIndex, setAudioIndex] = useState<number | null>(null);
 
@@ -956,12 +948,6 @@ function MediaPlayerContent({ file, onClose, isMinimized, setMinimized }: MediaP
     const audioRemux = details.audio_remux === true;
     const thumbSrc = useThumbnail(file.id, details.thumbnail_url);
     const deviceLabel = getDeviceLabel();
-
-    const { phase, src, mode, active, error: sessionError, deviceId, retry } =
-        usePlaybackSession(activeId, file.stream_url, audioIndex);
-
-    /* INSTANT START: no waiting on /files/{id} — the grid already gave us the basics. */
-    const videoMounted = !!src && (phase === 'ready' || phase === 'ended');
 
     /* ── State ── */
     const [playing, setPlaying] = useState(false);
@@ -985,6 +971,7 @@ function MediaPlayerContent({ file, onClose, isMinimized, setMinimized }: MediaP
     const [preparing, setPreparing] = useState(false);
     const [fsSupported] = useState(() => typeof document !== 'undefined' && !!document.fullscreenEnabled);
     const [pipSupported] = useState(() => typeof document !== 'undefined' && !!document.pictureInPictureEnabled);
+    const [videoMounted, setVideoMounted] = useState(false);
 
     /* ── Refs ── */
     const videoRef = useRef<HTMLVideoElement>(null);
@@ -1028,6 +1015,10 @@ function MediaPlayerContent({ file, onClose, isMinimized, setMinimized }: MediaP
     const prefsRef = useRef(prefs);
     const mediaErrorRef = useRef<string | null>(null);
 
+    // NOW call the hook (after playing is defined)
+    const { phase, src, mode, active, error: sessionError, deviceId, retry } =
+        usePlaybackSession(activeId, file.stream_url, audioIndex, playing);
+
     const dialogOpen = phase === 'limited' || phase === 'ended' || !!sessionError || !!mediaError;
     const effectiveShow = showControls || !playing || buffering || settingsOpen || dialogOpen;
     playingRef.current = playing;
@@ -1038,7 +1029,6 @@ function MediaPlayerContent({ file, onClose, isMinimized, setMinimized }: MediaP
     mediaErrorRef.current = mediaError;
     durationRef.current = duration || details.duration || 0;
 
-    /* Resume point from the grid data we already have — refined when details land. */
     const computeResume = (f: PlayerFile) => {
         const pos = f.last_pos ?? 0;
         const dur = f.duration ?? 0;
@@ -1050,6 +1040,10 @@ function MediaPlayerContent({ file, onClose, isMinimized, setMinimized }: MediaP
             resumePointRef.current = computeResume(extendedFile as PlayerFile);
         }
     }, [extendedFile]);
+
+    useEffect(() => {
+        if (src) setVideoMounted(true);
+    }, [src]);
 
     /* ── Toasts ── */
     const pushToast = useCallback((msg: string, kind: ToastKind = 'info') => {
@@ -1327,7 +1321,7 @@ function MediaPlayerContent({ file, onClose, isMinimized, setMinimized }: MediaP
         } catch (err) {
             pushToast(
                 axStatus(err) === 404 || axStatus(err) === 405
-                    ? 'Server-side preparation isn’t enabled yet.'
+                    ? "Server-side preparation isn't enabled yet."
                     : axStatus(err) === 403
                         ? 'Only the family account can prepare qualities.'
                         : 'Could not start preparation. Try again.',
@@ -1545,9 +1539,9 @@ function MediaPlayerContent({ file, onClose, isMinimized, setMinimized }: MediaP
         else if (code === 4 && riskyContainer) {
             msg = `This device can't decode ${container} (often HEVC video or AC3 audio inside). Try a phone or PC, or ask for an MP4 (H.264 + AAC) version.`;
         } else if (code === 4) {
-            msg = 'This device can\u2019t decode this file\u2019s format.';
+            msg = "This device can't decode this file's format.";
         } else if (code === 3) {
-            msg = 'Playback failed while decoding. The file may be corrupted or use a codec this device can\u2019t handle.';
+            msg = "Playback failed while decoding. The file may be corrupted or use a codec this device can't handle.";
         } else if (code === 2) {
             msg = 'The network dropped while streaming. Check the connection and try again.';
         } else {
@@ -1881,7 +1875,7 @@ function MediaPlayerContent({ file, onClose, isMinimized, setMinimized }: MediaP
                         </div>
                     )}
 
-                    {preparingStream && !errorMessage && phase !== 'limited' && (
+                    {preparingStream && !errorMessage && phase !== ('limited' as SessionPhase) && (
                         <div className="absolute inset-0 z-20 flex flex-col items-center justify-center gap-5">
                             <HearthMark />
                             <div className="flex items-center gap-3 text-[#9db6b1]">
@@ -1943,7 +1937,7 @@ function MediaPlayerContent({ file, onClose, isMinimized, setMinimized }: MediaP
                                     <Check className="h-7 w-7 text-[#2dd4bf]" />
                                 </span>
                                 <h2 className="text-lg font-bold text-[#e8f1ef]">Finished</h2>
-                                <p className="mb-5 mt-1 text-sm text-[#9db6b1]">Marked as watched — it won’t linger in Continue Watching.</p>
+                                <p className="mb-5 mt-1 text-sm text-[#9db6b1]">Marked as watched — it won't linger in Continue Watching.</p>
                                 <div className="flex gap-3">
                                     <button
                                         type="button" ref={replayBtnRef}
