@@ -4,22 +4,26 @@ Folder management API endpoints.
 from typing import Optional, List
 from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy import select, func
+from sqlalchemy import select, func, text, delete as sqlalchemy_delete, update
 
 from ..database import get_db
 from ..models import Folder, File, User
 from ..schemas import FolderResponse, FolderCreate, FolderUpdate, FolderWithChildren
 from ..auth import get_current_user
 from ..telegram import delete_from_storage_channel
-
+from .streaming import invalidate_meta
 
 router = APIRouter(prefix="/folders", tags=["Folders"])
 
 
+def check_admin(user: User):
+    """Helper to ensure only Admins can modify folders."""
+    if getattr(user, 'role', 'admin') != 'admin':
+        raise HTTPException(status_code=403, detail="Guests cannot modify the library")
+
+
 async def get_folder_file_count(db: AsyncSession, folder_id: int) -> int:
     """Get the total number of files in a folder and all its subfolders."""
-    # This is a recursive CTE approach for efficiency
-    from sqlalchemy import text
     query = text("""
         WITH RECURSIVE subfolders AS (
             SELECT id FROM folders WHERE id = :root_id
@@ -40,12 +44,10 @@ async def list_folders(
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
-    """List user's folders optimally."""
-    # Select folder and count of files in one query
+    """List all folders in the shared library."""
     stmt = (
         select(Folder, func.count(File.id).label("file_count"))
         .outerjoin(File, File.folder_id == Folder.id)
-        .where(Folder.user_id == current_user.id)
         .group_by(Folder.id)
         .order_by(Folder.name)
     )
@@ -77,12 +79,10 @@ async def get_folder_tree(
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
-    """Get the complete folder tree for the user optimally."""
-    # Get all folders with counts in one query
+    """Get the complete folder tree for the shared library."""
     stmt = (
         select(Folder, func.count(File.id).label("file_count"))
         .outerjoin(File, File.folder_id == Folder.id)
-        .where(Folder.user_id == current_user.id)
         .group_by(Folder.id)
         .order_by(Folder.name)
     )
@@ -90,7 +90,6 @@ async def get_folder_tree(
     result = await db.execute(stmt)
     rows = result.all()
     
-    # Build tree
     folder_map = {}
     for folder, file_count in rows:
         folder_map[folder.id] = {
@@ -104,7 +103,6 @@ async def get_folder_tree(
             "children": [],
         }
     
-    # Link parents and children
     roots = []
     for folder_data in folder_map.values():
         parent_id = folder_data["parent_id"]
@@ -126,7 +124,7 @@ async def get_folder(
     stmt = (
         select(Folder, func.count(File.id).label("file_count"))
         .outerjoin(File, File.folder_id == Folder.id)
-        .where(Folder.id == folder_id, Folder.user_id == current_user.id)
+        .where(Folder.id == folder_id)
         .group_by(Folder.id)
     )
     
@@ -156,21 +154,17 @@ async def create_folder(
     current_user: User = Depends(get_current_user),
 ):
     """Create a new folder."""
-    # Validate parent exists if specified
+    check_admin(current_user)
+
     if folder_data.parent_id:
         parent_result = await db.execute(
-            select(Folder).where(
-                Folder.id == folder_data.parent_id,
-                Folder.user_id == current_user.id
-            )
+            select(Folder).where(Folder.id == folder_data.parent_id)
         )
         if not parent_result.scalar_one_or_none():
             raise HTTPException(status_code=404, detail="Parent folder not found")
     
-    # Check for duplicate name in same parent
     existing = await db.execute(
         select(Folder).where(
-            Folder.user_id == current_user.id,
             Folder.parent_id == folder_data.parent_id,
             Folder.name == folder_data.name
         )
@@ -179,7 +173,7 @@ async def create_folder(
         raise HTTPException(status_code=400, detail="Folder with this name already exists")
     
     folder = Folder(
-        user_id=current_user.id,
+        user_id=current_user.id, # Assign to the admin who created it
         name=folder_data.name,
         parent_id=folder_data.parent_id,
     )
@@ -206,29 +200,23 @@ async def update_folder(
     current_user: User = Depends(get_current_user),
 ):
     """Update a folder (rename, move)."""
-    result = await db.execute(
-        select(Folder).where(Folder.id == folder_id, Folder.user_id == current_user.id)
-    )
+    check_admin(current_user)
+
+    result = await db.execute(select(Folder).where(Folder.id == folder_id))
     folder = result.scalar_one_or_none()
     
     if not folder:
         raise HTTPException(status_code=404, detail="Folder not found")
     
-    # Update fields
     if update_data.name is not None:
         folder.name = update_data.name
     if update_data.parent_id is not None:
-        # Prevent moving folder into itself
         if update_data.parent_id == folder_id:
             raise HTTPException(status_code=400, detail="Cannot move folder into itself")
         
-        # Verify target parent folder belongs to current user (security check)
         if update_data.parent_id != 0:
             parent_check = await db.execute(
-                select(Folder).where(
-                    Folder.id == update_data.parent_id,
-                    Folder.user_id == current_user.id
-                )
+                select(Folder).where(Folder.id == update_data.parent_id)
             )
             if not parent_check.scalar_one_or_none():
                 raise HTTPException(status_code=404, detail="Parent folder not found")
@@ -259,27 +247,21 @@ async def delete_folder(
     current_user: User = Depends(get_current_user),
 ):
     """Delete a folder. Files can be moved to another folder or deleted."""
-    result = await db.execute(
-        select(Folder).where(Folder.id == folder_id, Folder.user_id == current_user.id)
-    )
+    check_admin(current_user)
+
+    result = await db.execute(select(Folder).where(Folder.id == folder_id))
     folder = result.scalar_one_or_none()
     
     if not folder:
         raise HTTPException(status_code=404, detail="Folder not found")
     
-    # Move files if specified
     if move_files_to is not None:
-        from sqlalchemy import update
         await db.execute(
             update(File)
             .where(File.folder_id == folder_id)
             .values(folder_id=move_files_to if move_files_to != 0 else None)
         )
     else:
-        # Recursive delete of files in this folder AND subfolders
-        from sqlalchemy import text, delete
-        
-        # 1. Get all folder IDs (root + descendents)
         query = text("""
             WITH RECURSIVE subfolders AS (
                 SELECT id FROM folders WHERE id = :root_id
@@ -293,29 +275,30 @@ async def delete_folder(
         folder_ids = result.scalars().all()
         
         if folder_ids:
-            # 2. Get files to delete from Telegram
             file_query = select(File).where(File.folder_id.in_(folder_ids))
             file_result = await db.execute(file_query)
             files_to_delete = file_result.scalars().all()
             
-            # Collect all message IDs for batch deletion
-            message_ids = [f.channel_message_id for f in files_to_delete if f.channel_message_id]
+            message_ids = []
+            for f in files_to_delete:
+                if f.channel_message_id:
+                    message_ids.append(f.channel_message_id)
+                invalidate_meta(f.id, f.channel_message_id) # Clear cache
             
             if message_ids:
-                # Chunk into batches of 100 to avoid Telegram limits/errors
                 chunk_size = 100
                 for i in range(0, len(message_ids), chunk_size):
                     batch = message_ids[i:i + chunk_size]
                     await delete_from_storage_channel(batch)
             
-            # 3. Delete files from DB
-            await db.execute(delete(File).where(File.folder_id.in_(folder_ids)))
+            await db.execute(sqlalchemy_delete(File).where(File.folder_id.in_(folder_ids)))
     
-    # Delete folder (cascade will handle child folders)
     await db.delete(folder)
     await db.commit()
     
     return {"message": "Folder deleted successfully"}
+
+
 @router.post("/batch-delete")
 async def batch_delete_folders(
     folder_ids: List[int],
@@ -323,21 +306,16 @@ async def batch_delete_folders(
     current_user: User = Depends(get_current_user),
 ):
     """Delete multiple folders."""
-    # Fetch all folders
-    result = await db.execute(
-        select(Folder).where(Folder.id.in_(folder_ids), Folder.user_id == current_user.id)
-    )
+    check_admin(current_user)
+
+    result = await db.execute(select(Folder).where(Folder.id.in_(folder_ids)))
     folders = result.scalars().all()
     
     if not folders:
         return {"message": "No folders found to delete"}
     
-    # Recursive delete of files in all these folders
-    from sqlalchemy import text, delete as sqlalchemy_delete
-    
     all_affected_folder_ids = []
     for folder in folders:
-        # Get all subfolder IDs for this folder
         query = text("""
             WITH RECURSIVE subfolders AS (
                 SELECT id FROM folders WHERE id = :root_id
@@ -350,32 +328,32 @@ async def batch_delete_folders(
         folder_result = await db.execute(query, {"root_id": folder.id})
         all_affected_folder_ids.extend(folder_result.scalars().all())
     
-    # Remove duplicates
     all_affected_folder_ids = list(set(all_affected_folder_ids))
     
     if all_affected_folder_ids:
-        # Get files to delete from Telegram
         file_query = select(File).where(File.folder_id.in_(all_affected_folder_ids))
         file_result = await db.execute(file_query)
         files_to_delete = file_result.scalars().all()
         
-        # Collect message IDs
-        message_ids = [f.channel_message_id for f in files_to_delete if f.channel_message_id]
+        message_ids = []
+        for f in files_to_delete:
+            if f.channel_message_id:
+                message_ids.append(f.channel_message_id)
+            invalidate_meta(f.id, f.channel_message_id) # Clear cache
         
         if message_ids:
-            # Batch delete from Telegram
             await delete_from_storage_channel(message_ids)
         
-        # Delete files from DB
         await db.execute(sqlalchemy_delete(File).where(File.folder_id.in_(all_affected_folder_ids)))
     
-    # Delete folders from DB
     for folder in folders:
         await db.delete(folder)
         
     await db.commit()
     
     return {"message": f"Deleted {len(folders)} folders and their content"}
+
+
 @router.post("/batch-move")
 async def batch_move_folders(
     move_data: dict,
@@ -383,29 +361,27 @@ async def batch_move_folders(
     current_user: User = Depends(get_current_user),
 ):
     """Move multiple folders to another folder."""
+    check_admin(current_user)
+
     folder_ids = move_data.get("ids", [])
     target_id = move_data.get("folder_id")
     
     if target_id == 0:
         target_id = None
         
-    # Prevent moving folder into itself
     if target_id in folder_ids:
         raise HTTPException(status_code=400, detail="Cannot move a folder into itself")
         
-    # Verify target parent folder belongs to user
     if target_id is not None:
         parent_check = await db.execute(
-            select(Folder).where(Folder.id == target_id, Folder.user_id == current_user.id)
+            select(Folder).where(Folder.id == target_id)
         )
         if not parent_check.scalar_one_or_none():
             raise HTTPException(status_code=404, detail="Target parent folder not found")
             
-    # Update folders
-    from sqlalchemy import update
     await db.execute(
         update(Folder)
-        .where(Folder.id.in_(folder_ids), Folder.user_id == current_user.id)
+        .where(Folder.id.in_(folder_ids))
         .values(parent_id=target_id)
     )
     

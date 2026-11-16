@@ -9,22 +9,17 @@ from pathlib import Path
 import asyncio
 import logging
 
-
 settings = get_settings()
 
 # Absolute path for session files
 BASE_DIR = Path(__file__).resolve().parent.parent
 SESSION_DIR = BASE_DIR / "session"
 
-
 def get_session_name(index: int) -> str:
     return str(SESSION_DIR / f"bot_{index}")
 
-
-# Created in build_clients() inside the running event loop (see start_telegram_client).
 clients: list[Client] = []
 tg_client: Client | None = None
-
 
 def build_clients() -> None:
     """Build client pool lazily so Pyrogram binds to uvicorn's event loop."""
@@ -40,16 +35,15 @@ def build_clients() -> None:
             bot_token=token,
             ipv6=False,
             max_concurrent_transmissions=settings.telegram_client_concurrency,
-            no_updates=(i > 0),          # only main client receives updates
+            sleep_threshold=10, # Auto-wait for FloodWait under 10 seconds
+            no_updates=(i > 0), # only main client receives updates
         )
-        client.pool_index = i            # custom attr for logging
+        client.pool_index = i   # custom attr for logging
         clients.append(client)
     tg_client = clients[0]
 
-
 # ── lifecycle helpers ────────────────────────────────────────────────
 logger = logging.getLogger(__name__)
-
 
 async def start_one_client(i, c):
     try:
@@ -60,11 +54,9 @@ async def start_one_client(i, c):
     except Exception as e:
         logger.error("Client %d failed to start: %s", i, e)
 
-
 async def start_all_clients():
     logger.info("Starting %d Telegram client(s)...", len(clients))
     await asyncio.gather(*(start_one_client(i, c) for i, c in enumerate(clients)))
-
 
 async def stop_one_client(c):
     try:
@@ -73,10 +65,8 @@ async def stop_one_client(c):
     except Exception:
         pass
 
-
 async def stop_all_clients():
     await asyncio.gather(*(stop_one_client(c) for c in clients))
-
 
 async def start_telegram_client():
     """Called from app lifespan — starts the full pool."""
@@ -84,11 +74,9 @@ async def start_telegram_client():
     from . import bot  # noqa: F401 — register handlers after client exists
     await start_all_clients()
 
-
 async def stop_telegram_client():
     """Called from app lifespan — stops the full pool."""
     await stop_all_clients()
-
 
 # ── convenience helpers (always use tg_client) ───────────────────────
 
@@ -99,12 +87,9 @@ async def get_message_from_channel(message_id: int) -> Message:
         message_id,
     )
 
-
 async def forward_to_storage_channel(message: Message) -> Message:
     """Forward a message to the storage channel."""
     return await message.copy(settings.telegram_storage_channel_id)
-
-
 
 async def delete_from_storage_channel(message_ids: int | list[int]) -> bool:
     """Delete message(s) from the storage channel."""
@@ -116,4 +101,4 @@ async def delete_from_storage_channel(message_ids: int | list[int]) -> bool:
         return True
     except Exception:
         return False
-
+    

@@ -1,15 +1,18 @@
 """
 Authentication API endpoints.
 """
-from datetime import datetime
+from datetime import datetime, timedelta
+import hmac
+import hashlib
 from fastapi import APIRouter, Depends, HTTPException, Request
+from pydantic import BaseModel, Field
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select
 from slowapi import Limiter
 from slowapi.util import get_remote_address
 
 from ..database import get_db
-from ..models import User, LoginCode
+from ..models import User, LoginCode, GuestCredential
 from ..schemas import (
     Token, 
     UserResponse, 
@@ -26,6 +29,7 @@ from ..auth import (
     verify_token,
     verify_token_payload,
     get_current_user,
+    hash_pin
 )
 from .. import telegram
 
@@ -34,6 +38,25 @@ limiter = Limiter(key_func=get_remote_address)
 
 router = APIRouter(prefix="/auth", tags=["Authentication"])
 
+class GuestLogin(BaseModel):
+    pin: str = Field(pattern=r"^\d{6}$")
+
+
+async def get_or_create_guest_user(db: AsyncSession) -> User:
+    """Create or get the single guest user row."""
+    result = await db.execute(select(User).where(User.telegram_id == -1))
+    user = result.scalar_one_or_none()
+    if not user:
+        user = User(
+            telegram_id=-1,
+            username="guest",
+            first_name="Guest",
+            role="guest"
+        )
+        db.add(user)
+        await db.commit()
+        await db.refresh(user)
+    return user
 
 
 @router.get("/bot/info", response_model=BotInfoResponse)
@@ -50,6 +73,43 @@ async def get_bot_info_endpoint():
         raise HTTPException(status_code=500, detail=str(e))
 
 
+@router.post("/guest/login", response_model=AuthResponse)
+@limiter.limit("5/minute")
+async def guest_login(
+    request: Request,
+    body: GuestLogin,
+    db: AsyncSession = Depends(get_db)
+):
+    """Login with a 6-digit Guest PIN."""
+    cred = await db.get(GuestCredential, 1)
+    if not cred or not cred.pin_hash or not cred.expires_at or cred.expires_at < datetime.utcnow():
+        raise HTTPException(status_code=401, detail="Guest access is currently disabled or expired")
+    
+    if not hmac.compare_digest(cred.pin_hash, hash_pin(body.pin)):
+        raise HTTPException(status_code=401, detail="Wrong PIN")
+        
+    guest = await get_or_create_guest_user(db)
+    
+    left = cred.expires_at - datetime.utcnow()
+    # Guest gets no refresh token, short-lived access token
+    token = create_access_token(guest.telegram_id, role="guest", expires_delta=left, extra_claims={"gv": cred.version})
+    
+    return AuthResponse(
+        access_token=token,
+        refresh_token=None,
+        user=UserResponse(
+            id=guest.id,
+            telegram_id=guest.telegram_id,
+            username=guest.username,
+            first_name=guest.first_name,
+            last_name=guest.last_name,
+            created_at=guest.created_at,
+            last_active=guest.last_active,
+            role="guest" # Add this manually if schema doesn't have it yet
+        )
+    )
+
+
 @router.post("/refresh", response_model=Token)
 async def refresh_token(
     request: RefreshTokenRequest,
@@ -63,20 +123,18 @@ async def refresh_token(
     if not telegram_id:
         raise HTTPException(status_code=401, detail="Invalid refresh token")
     
-    # Verify user exists
     result = await db.execute(
         select(User).where(User.telegram_id == telegram_id)
     )
     user = result.scalar_one_or_none()
     
-    if not user:
-        raise HTTPException(status_code=401, detail="User not found")
+    if not user or getattr(user, 'role', 'admin') == 'guest':
+        raise HTTPException(status_code=401, detail="User not found or guest cannot refresh")
     
     if token_version is not None and token_version < user.auth_version:
         raise HTTPException(status_code=401, detail="Refresh token has been invalidated")
     
-    # Generate new tokens
-    new_access_token = create_access_token(telegram_id, version=user.auth_version)
+    new_access_token = create_access_token(telegram_id, role=user.role, version=user.auth_version)
     new_refresh_token = create_refresh_token(telegram_id, version=user.auth_version)
     
     return Token(
@@ -110,6 +168,7 @@ async def get_current_user_info(
         last_name=current_user.last_name,
         created_at=current_user.created_at,
         last_active=current_user.last_active,
+        role=getattr(current_user, 'role', 'admin') # Safely handle existing users
     )
 
 
@@ -117,26 +176,18 @@ async def get_current_user_info(
 async def generate_login_code(
     db: AsyncSession = Depends(get_db),
 ):
-    """
-    Generate a new login code for TV/Device authentication.
-    The code is displayed to the user and entered in the Telegram bot.
-    """
-    # Generate unique 6-digit code
+    """Generate a new login code for TV/Device authentication."""
     import secrets
-    import string
     
-    alphabet = string.ascii_uppercase + string.digits
+    # F15: Removed look-alike characters (0, O, 1, I, L)
+    alphabet = "ABCDEFGHJKMNPQRSTUVWXYZ23456789"
     code = ''.join(secrets.choice(alphabet) for _ in range(6))
     
-    # Expiry in 5 minutes
-    expires_at = datetime.utcnow().replace(minute=(datetime.utcnow().minute + 5) % 60)
-    if expires_at < datetime.utcnow(): # Handle hour rollover roughly
-        from datetime import timedelta
-        expires_at = datetime.utcnow() + timedelta(minutes=5)
+    expires_at = datetime.utcnow() + timedelta(minutes=5)
         
     login_code = LoginCode(
         code=code,
-        telegram_id=None, # Initially null, set by bot
+        telegram_id=None,
         expires_at=expires_at
     )
     db.add(login_code)
@@ -150,17 +201,13 @@ async def generate_login_code(
 
 
 @router.post("/verify-code", response_model=AuthResponse)
-@limiter.limit("40/minute")  # Allow TV polling while limiting brute force attempts
+@limiter.limit("40/minute")
 async def verify_login_code(
-    request: Request,  # Required for rate limiter
+    request: Request,
     code_request: VerifyCodeRequest,
     db: AsyncSession = Depends(get_db),
 ):
-    """
-    Check if the login code has been claimed by a user via Telegram bot.
-    If claimed, returns access tokens and user info.
-    """
-    # Find code (case-insensitive)
+    """Check if the login code has been claimed by a user via Telegram bot."""
     result = await db.execute(
         select(LoginCode).where(LoginCode.code == code_request.code.upper())
     )
@@ -174,25 +221,20 @@ async def verify_login_code(
         await db.commit()
         raise HTTPException(status_code=400, detail="Login code expired")
     
-    # Check if user has claimed it (telegram_id is set)
     if not login_code.telegram_id:
         raise HTTPException(status_code=400, detail="Code not yet verified")
         
-    # Get user
     result = await db.execute(
         select(User).where(User.telegram_id == login_code.telegram_id)
     )
     user = result.scalar_one_or_none()
     
     if not user:
-        # Should not happen if bot flow is correct
         raise HTTPException(status_code=404, detail="User not found")
         
-    # Generate tokens
-    access_token = create_access_token(user.telegram_id, version=user.auth_version)
+    access_token = create_access_token(user.telegram_id, role=getattr(user, 'role', 'admin'), version=user.auth_version)
     refresh_token = create_refresh_token(user.telegram_id, version=user.auth_version)
     
-    # Delete code after successful login
     await db.delete(login_code)
     await db.commit()
     
@@ -203,19 +245,12 @@ async def verify_login_code(
     )
 
 
-# Keep this for backward compatibility or direct code login if needed, 
-# but verify-code is the main one for TV flow now.
 @router.post("/code", response_model=Token)
 async def login_with_code(
     request: Request,
     code_request: LoginCodeRequest,
     db: AsyncSession = Depends(get_db),
 ):
-   """Legacy endpoint - use verify-code instead."""
-   # Same logic as verify-code but returns only Token
-   # ... (reusing logic or redirecting)
-   return await verify_login_code(
-       request,
-       VerifyCodeRequest(code=code_request.code),
-       db
-   )
+   """Legacy endpoint."""
+   res = await verify_login_code(request, VerifyCodeRequest(code=code_request.code), db)
+   return Token(access_token=res.access_token, refresh_token=res.refresh_token)

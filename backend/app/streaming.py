@@ -1,177 +1,166 @@
 """
-Custom streaming utilities for Telegram media files.
-Multi-client parallel streaming for maximum download speed.
+backend/app/streaming.py (engine) -- bounded, multi-worker Telegram streaming.
+Based on Claude's Hearth upgrade plan.
 """
 import asyncio
 import logging
-from typing import AsyncGenerator
-
-logger = logging.getLogger(__name__)
+import time
+from typing import AsyncGenerator, List
 
 from pyrogram import Client
-
 from .telegram import clients
 from .config import get_settings
 
+logger = logging.getLogger(__name__)
 settings = get_settings()
 
-logger = logging.getLogger("streamer")
-logger.setLevel(logging.INFO)
+CHUNK_SIZE = 1024 * 1024        # Telegram stream_media granularity (1 MiB)
+READ_AHEAD_CHUNKS = 12          # max chunks fetched ahead (~12 MiB)
+MAX_CHUNK_RETRIES = 3
+MSG_CACHE_TTL = 600             # seconds
 
+_semaphores: dict[int, asyncio.Semaphore] = {}
+_msg_cache: dict[tuple[int, int, int], tuple[float, object]] = {}
 
-# Global semaphores to limit concurrency per client across all streams
-_client_semaphores = {}
+def _sem(c_idx: int) -> asyncio.Semaphore:
+    if c_idx not in _semaphores:
+        _semaphores[c_idx] = asyncio.Semaphore(max(1, settings.telegram_client_concurrency))
+    return _semaphores[c_idx]
 
-def get_client_semaphore(client_index: int) -> asyncio.Semaphore:
-    if client_index not in _client_semaphores:
-        # Use the configured concurrency limit
-        _client_semaphores[client_index] = asyncio.Semaphore(settings.telegram_client_concurrency)
-    return _client_semaphores[client_index]
+async def _client_message(client, c_idx: int, chat_id: int, message_id: int, force: bool = False):
+    key = (c_idx, chat_id, message_id)
+    hit = _msg_cache.get(key)
+    now = time.monotonic()
+    if hit and not force and now - hit[0] < MSG_CACHE_TTL:
+        return hit[1]
+    msg = await client.get_messages(chat_id, message_id)
+    if msg and (msg.document or msg.video or msg.audio):
+        _msg_cache[key] = (now, msg)
+        return msg
+    _msg_cache.pop(key, None)
+    return None
 
+def forget_message(message_id: int) -> None:
+    """Call after a file is deleted so stale cache entries disappear."""
+    for key in [k for k in _msg_cache if k[2] == message_id]:
+        _msg_cache.pop(key, None)
 
-async def parallel_stream_generator(
-    initial_message,
-    offset: int,
-    length: int,
-    chunk_size: int = 1024 * 1024,
-    concurrency: int = None,
-):
+async def prepare_stream(message_id: int) -> List[tuple]:
     """
-    Fetch file chunks in parallel using the client pool.
-    Each worker uses its own client and fetches its own Message object
-    to avoid cross-bot FILE_REFERENCE_INVALID errors.
+    Resolve the storage-channel message once per client (cached).
+    Returns [(client_index, client, message), ...]; empty list => message no longer exists.
     """
-    pool_size = len(clients)
-    if concurrency is None:
-        concurrency = max(pool_size, 1)
+    chat_id = settings.telegram_storage_channel_id
+    pool = list(clients)
+
+    async def one(i, c):
+        idx = getattr(c, "pool_index", i)
+        try:
+            return idx, c, await _client_message(c, idx, chat_id, message_id)
+        except Exception as e:
+            logger.error("Bot %s: cannot fetch message %s: %s", idx, message_id, e)
+            return idx, c, None
+
+    got = await asyncio.gather(*(one(i, c) for i, c in enumerate(pool)))
+    return [(idx, c, m) for idx, c, m in got if m is not None]
+
+async def parallel_stream_generator(ctx: list, offset: int, length: int, chunk_size: int = CHUNK_SIZE) -> AsyncGenerator[bytes, None]:
+    if not ctx:
+        raise RuntimeError("No Telegram client can access this message")
 
     start_chunk = offset // chunk_size
     end_chunk = (offset + length - 1) // chunk_size
-    total_chunks = end_chunk - start_chunk + 1
+    total = end_chunk - start_chunk + 1
+    n_workers = min(total, len(ctx) * max(1, settings.telegram_client_concurrency))
 
-    chat_id = initial_message.chat.id
-    message_id = initial_message.id
-
-    # ── Pre-fetch messages for ALL clients in parallel (eliminates lag) ──
-    async def fetch_msg(client, idx):
-        try:
-            msg = await client.get_messages(chat_id, message_id)
-            if msg and (msg.document or msg.video or msg.audio):
-                return (idx, msg)
-            else:
-                logger.warning("Bot %d: message %d has no media", idx, message_id)
-                return (idx, None)
-        except Exception as e:
-            logger.error("Bot %d: failed to fetch message: %s", idx, e)
-            return (idx, None)
-
-    # Fetch all in parallel — fast!
-    fetch_tasks = []
-    for i in range(concurrency):
-        c = clients[i % pool_size]
-        c_idx = getattr(c, "pool_index", i % pool_size)
-        fetch_tasks.append(fetch_msg(c, c_idx))
-
-    fetch_results = await asyncio.gather(*fetch_tasks)
-    client_messages = {idx: msg for idx, msg in fetch_results if msg is not None}
-
-    if not client_messages:
-        logger.error("No client could fetch the message")
-        return
-
-    # Task queue
-    task_queue = asyncio.Queue()
-    for i in range(total_chunks):
-        task_queue.put_nowait(start_chunk + i)
-
-    # Pre-create Futures for ordered yielding
     loop = asyncio.get_running_loop()
-    results = {
-        (start_chunk + i): loop.create_future()
-        for i in range(total_chunks)
-    }
+    results = {i: loop.create_future() for i in range(start_chunk, end_chunk + 1)}
+    state = {"next": start_chunk, "consumed": start_chunk}
+    cond = asyncio.Condition()
 
-    async def worker(worker_id: int):
-        client = clients[worker_id % pool_size]
-        c_idx = getattr(client, "pool_index", worker_id % pool_size)
+    async def claim():
+        """Hand out chunk indexes in order, but never run further ahead than READ_AHEAD_CHUNKS."""
+        async with cond:
+            while True:
+                n = state["next"]
+                if n > end_chunk:
+                    return None
+                if n < state["consumed"] + READ_AHEAD_CHUNKS:
+                    state["next"] = n + 1
+                    return n
+                await cond.wait()
 
-        # Get semaphore for this client to ensure we don't exceed max_concurrent_transmissions
-        # This prevents the "Request refused" or internal queue buildup in Pyrogram
-        semaphore = get_client_semaphore(c_idx)
+    async def worker(w: int):
+        c_idx, client, msg = ctx[w % len(ctx)]
+        sem = _sem(c_idx)
+        while True:
+            n = await claim()
+            if n is None:
+                return
+            fut = results[n]
+            data, last_exc = None, None
+            for attempt in range(MAX_CHUNK_RETRIES):
+                try:
+                    async with sem:
+                        buf = bytearray()
+                        async for part in client.stream_media(msg, limit=1, offset=n):
+                            buf += part
+                    data = bytes(buf)
+                    break
+                except asyncio.CancelledError:
+                    raise
+                except Exception as e:
+                    last_exc = e
+                    wait = getattr(e, "value", None)
+                    if isinstance(wait, int) and 0 < wait <= 30:
+                        await asyncio.sleep(wait)
+                    elif "FILE_REFERENCE" in str(e).upper():
+                        fresh = await _client_message(client, c_idx, msg.chat.id, msg.id, force=True)
+                        if fresh is not None:
+                            msg = fresh
+                    else:
+                        await asyncio.sleep(0.4 * (attempt + 1))
+            if not fut.done():
+                if data is None:
+                    logger.error("Bot %s gave up on chunk %s: %s", c_idx, n, last_exc)
+                    fut.set_exception(last_exc or RuntimeError("chunk download failed"))
+                else:
+                    fut.set_result(data)
 
-        msg = client_messages.get(c_idx)
-        if msg is None:
-            return  # This client couldn't access the file
-
-        while not task_queue.empty():
-            try:
-                chunk_idx = task_queue.get_nowait()
-            except asyncio.QueueEmpty:
-                break
-
-            try:
-                # Wait for slot before requesting chunk
-                async with semaphore:
-                    data = b""
-                    async for part in client.stream_media(
-                        msg, limit=1, offset=chunk_idx
-                    ):
-                        data += part
-
-                if not results[chunk_idx].done():
-                    results[chunk_idx].set_result(data)
-            except Exception as e:
-                logger.error("Bot %d failed chunk %d: %s", c_idx, chunk_idx, e)
-                if not results[chunk_idx].done():
-                    results[chunk_idx].set_exception(e)
-            finally:
-                task_queue.task_done()
-
-    # Launch workers
-    worker_tasks = [
-        asyncio.create_task(worker(i)) for i in range(concurrency)
-    ]
-
-    # Yield results in order
-    current_idx = start_chunk
+    workers = [asyncio.create_task(worker(w)) for w in range(n_workers)]
     try:
-        for _ in range(total_chunks):
-            chunk_data = await results[current_idx]
-            yield chunk_data
-            del results[current_idx]
-            current_idx += 1
+        for n in range(start_chunk, end_chunk + 1):
+            data = await results[n]
+            results.pop(n, None)
+            async with cond:
+                state["consumed"] = n + 1
+                cond.notify_all()
+            yield data
     finally:
-        for w in worker_tasks:
-            w.cancel()
+        for t in workers:
+            t.cancel()
+        await asyncio.gather(*workers, return_exceptions=True)
+        for f in results.values():
+            if f.done() and not f.cancelled():
+                f.exception()
 
-
-async def stream_file(
-    client: Client,          # kept for API compat; pool is used instead
-    message,
-    from_bytes: int,
-    until_bytes: int,
-) -> AsyncGenerator[bytes, None]:
-    """Stream a file range using the multi-client pool."""
-    CHUNK_SIZE = 1024 * 1024
-
-    total_bytes_needed = until_bytes - from_bytes + 1
-    bytes_yielded = 0
-    bytes_to_skip = from_bytes % CHUNK_SIZE
-
-    logger.debug("Streaming %d-%d (%d bytes)", from_bytes, until_bytes, total_bytes_needed)
-
-    async for chunk in parallel_stream_generator(
-        message, from_bytes, total_bytes_needed
-    ):
-        if bytes_to_skip > 0:
-            chunk = chunk[bytes_to_skip:]
-            bytes_to_skip = 0
-
-        remaining = total_bytes_needed - bytes_yielded
-        if len(chunk) > remaining:
-            chunk = chunk[:remaining]
-
-        yield chunk
-        bytes_yielded += len(chunk)
-        if bytes_yielded >= total_bytes_needed:
-            break
+async def stream_file(ctx: list, from_bytes: int, until_bytes: int) -> AsyncGenerator[bytes, None]:
+    """Yield exactly bytes [from_bytes, until_bytes] of the file."""
+    total = until_bytes - from_bytes + 1
+    skip = from_bytes % CHUNK_SIZE
+    sent = 0
+    agen = parallel_stream_generator(ctx, from_bytes, total)
+    try:
+        async for chunk in agen:
+            if skip:
+                chunk, skip = chunk[skip:], 0
+            remaining = total - sent
+            if len(chunk) > remaining:
+                chunk = chunk[:remaining]
+            if chunk:
+                yield chunk
+                sent += len(chunk)
+            if sent >= total:
+                break
+    finally:
+        await agen.aclose()     # stop workers immediately on seek/close

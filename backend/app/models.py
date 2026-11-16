@@ -18,6 +18,10 @@ class User(Base):
     first_name: Mapped[Optional[str]] = mapped_column(String(255))
     last_name: Mapped[Optional[str]] = mapped_column(String(255))
     auth_version: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    
+    # Role: "admin" (full access) or "guest" (play only)
+    role: Mapped[str] = mapped_column(String(10), default="admin", server_default="admin", nullable=False)
+    
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
     last_active: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
     
@@ -75,9 +79,6 @@ class File(Base):
     height: Mapped[Optional[int]] = mapped_column(Integer)
     thumbnail_file_id: Mapped[Optional[str]] = mapped_column(String(255))
     
-    # Sharing
-    public_hash: Mapped[Optional[str]] = mapped_column(String(64), unique=True, index=True)
-    
     # Timestamps
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
     updated_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
@@ -125,3 +126,14 @@ class LoginCode(Base):
     telegram_id: Mapped[Optional[int]] = mapped_column(BigInteger, nullable=True)
     expires_at: Mapped[datetime] = mapped_column(DateTime, nullable=False)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+
+
+class GuestCredential(Base):
+    """Stores the hashed PIN for Guest access."""
+    __tablename__ = "guest_credentials"
+    
+    id: Mapped[int] = mapped_column(primary_key=True) # Always ID 1
+    pin_hash: Mapped[Optional[str]] = mapped_column(String(64), nullable=True)
+    expires_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
+    version: Mapped[int] = mapped_column(Integer, default=0)
+    

@@ -44,7 +44,6 @@ class Settings(BaseSettings):
     # Database
     database_url: str
     
-    
     # JWT
     jwt_secret: str
     jwt_expiry_minutes: int = 10080  # 7 days for persistent sessions
@@ -53,8 +52,18 @@ class Settings(BaseSettings):
     server_host: str = "0.0.0.0"
     server_port: int = 8000
     
-    # Concurrency
-    telegram_client_concurrency: int = 3
+    # Concurrency / Playback limits
+    telegram_client_concurrency: int = 4      # Parallel 1 MiB requests PER BOT
+    max_playback_devices: int = 2             # Max simultaneous video streams
+    stream_token_hours: int = 12
+    guest_pin_hours: int = 24
+
+    # CORS (For Cloudflare Pages deployment later)
+    cors_origins_str: str = Field("http://localhost:3000,http://localhost:5173", alias="CORS_ORIGINS")
+
+    @property
+    def cors_origins(self) -> list[str]:
+        return [o.strip() for o in self.cors_origins_str.split(",") if o.strip()]
     
     # Web
     web_base_url: str = "http://localhost:3000"
@@ -62,7 +71,7 @@ class Settings(BaseSettings):
     class Config:
         env_file = ".env"
         env_file_encoding = "utf-8"
-
+        extra = "ignore"
 
 @lru_cache()
 def get_settings() -> Settings:

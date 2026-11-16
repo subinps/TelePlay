@@ -23,6 +23,7 @@ class UserResponse(UserBase):
     id: int
     created_at: datetime
     last_active: datetime
+    role: str = "admin"  # <--- ADDED
     
     model_config = ConfigDict(from_attributes=True)
 
@@ -91,11 +92,10 @@ class FileResponse(FileBase):
     created_at: datetime
     updated_at: datetime
     thumbnail_url: Optional[str] = None
-    stream_url: Optional[str] = None
-    download_url: Optional[str] = None
-    public_hash: Optional[str] = None
-    public_stream_url: Optional[str] = None
     last_pos: int = 0
+    completed: bool = False  # <--- ADDED
+    
+    # Removed: stream_url, download_url, public_hash, public_stream_url
     
     model_config = ConfigDict(from_attributes=True)
 
@@ -132,7 +132,7 @@ class WatchProgressResponse(WatchProgressBase):
 
 class Token(BaseModel):
     access_token: str
-    refresh_token: str
+    refresh_token: Optional[str] = None  # <--- MADE OPTIONAL for Guests
     token_type: str = "bearer"
 
 

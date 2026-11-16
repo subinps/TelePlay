@@ -2,7 +2,8 @@
 
 # Telegram MTProto Client
 pyrotgfork>=2.2.0
-TgCrypto>=1.2.3
+# TgCrypto>=1.2.3
+TgrCrypto
 
 # Web Framework
 fastapi>=0.109.0

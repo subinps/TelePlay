@@ -3,6 +3,9 @@ JWT authentication utilities.
 """
 from datetime import datetime, timedelta
 from typing import Optional
+import time
+import hmac
+import hashlib
 
 from jose import jwt, JWTError
 from fastapi import Depends, HTTPException, status, Request
@@ -18,17 +21,41 @@ from .schemas import TokenPayload
 settings = get_settings()
 security = HTTPBearer(auto_error=False)
 
+# Global tracker to instantly invalidate Guest tokens when the PIN is rotated
+_guest_revoked_before = 0.0
+
+def revoke_guest_tokens():
+    global _guest_revoked_before
+    _guest_revoked_before = time.time()
+
+def hash_pin(pin: str) -> str:
+    """Securely hash a 6-digit PIN using the server's JWT secret."""
+    return hmac.new(settings.jwt_secret.encode(), pin.encode(), hashlib.sha256).hexdigest()
 
 
-def create_access_token(telegram_id: int, version: int = 0) -> str:
+def create_access_token(
+    telegram_id: int, 
+    role: str = "admin", 
+    version: int = 0, 
+    expires_delta: Optional[timedelta] = None,
+    extra_claims: Optional[dict] = None
+) -> str:
     """Create a JWT access token."""
-    expire = datetime.utcnow() + timedelta(minutes=settings.jwt_expiry_minutes)
+    if expires_delta:
+        expire = datetime.utcnow() + expires_delta
+    else:
+        expire = datetime.utcnow() + timedelta(minutes=settings.jwt_expiry_minutes)
+        
     payload = {
-        "sub": str(telegram_id),  # Subject must be string
+        "sub": str(telegram_id),
         "exp": expire,
         "type": "access",
-        "ver": version
+        "ver": version,
+        "role": role
     }
+    if extra_claims:
+        payload.update(extra_claims)
+        
     return jwt.encode(payload, settings.jwt_secret, algorithm="HS256")
 
 
@@ -36,12 +63,43 @@ def create_refresh_token(telegram_id: int, version: int = 0) -> str:
     """Create a JWT refresh token (longer expiry)."""
     expire = datetime.utcnow() + timedelta(days=90)
     payload = {
-        "sub": str(telegram_id),  # Subject must be string
+        "sub": str(telegram_id),
         "exp": expire,
         "type": "refresh",
         "ver": version
     }
     return jwt.encode(payload, settings.jwt_secret, algorithm="HS256")
+
+
+def create_stream_token(file_id: int, device_id: str, role: str, label: str, hours: int | None = None) -> str:
+    """Create a short-lived token specifically for streaming a video."""
+    now = int(time.time())
+    payload = {
+        "typ": "stream", 
+        "fid": file_id, 
+        "did": device_id, 
+        "role": role, 
+        "lbl": label,
+        "iat": now, 
+        "exp": now + 3600 * (hours or settings.stream_token_hours)
+    }
+    return jwt.encode(payload, settings.jwt_secret, algorithm="HS256")
+
+
+def verify_stream_token(token: str, file_id: int) -> dict:
+    """Verify a stream token and ensure it matches the requested file."""
+    try:
+        c = jwt.decode(token, settings.jwt_secret, algorithms=["HS256"])
+    except Exception:
+        raise HTTPException(401, "Invalid or expired stream token")
+        
+    if c.get("typ") != "stream" or c.get("fid") != file_id:
+        raise HTTPException(401, "Token not valid for this file")
+        
+    if c.get("role") == "guest" and c.get("iat", 0) < _guest_revoked_before:
+        raise HTTPException(401, "Guest session has ended")
+        
+    return c
 
 
 def verify_token_payload(token: str, token_type: str = "access") -> Optional[dict]:
@@ -65,7 +123,6 @@ def verify_token(token: str, token_type: str = "access") -> Optional[int]:
     return int(sub) if sub is not None else None
 
 
-
 async def get_current_user(
     request: Request = None,
     credentials: Optional[HTTPAuthorizationCredentials] = Depends(security),
@@ -74,11 +131,10 @@ async def get_current_user(
     """Dependency to get current authenticated user. Supports Bearer token or query param."""
     token = None
     
-    # Try getting token from Authorization header
     if credentials:
         token = credentials.credentials
     
-    # If not in header, try query parameter (for streaming/images)
+    # Fallback to query param (needed for <img> and <video> tags)
     if not token and request and "token" in request.query_params:
         token = request.query_params["token"]
         
@@ -89,7 +145,6 @@ async def get_current_user(
             headers={"WWW-Authenticate": "Bearer"},
         )
     
-    # Verify token
     try:
         payload = verify_token_payload(token)
         telegram_id = int(payload.get("sub")) if payload and payload.get("sub") else None
@@ -114,7 +169,6 @@ async def get_current_user(
             detail="User not found",
         )
     
-    # Check token version for global logout
     if token_version is not None and token_version < user.auth_version:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
@@ -122,4 +176,14 @@ async def get_current_user(
             headers={"WWW-Authenticate": "Bearer"},
         )
     
+    return user
+
+
+async def require_admin(user: User = Depends(get_current_user)) -> User:
+    """Dependency to ensure the user is an Admin, not a Guest."""
+    if getattr(user, 'role', 'admin') != "admin":
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Guests cannot modify the library"
+        )
     return user

@@ -8,13 +8,12 @@ from sqlalchemy import select, desc
 from sqlalchemy.orm import selectinload
 
 from ..database import get_db
-from ..models import File, User, Folder, WatchProgress
+from ..models import File, User, Folder
 from ..auth import get_current_user
 from ..config import get_settings
 from ..services import (
     escape_like, 
     add_urls_to_file, 
-    fetch_recent_files, 
     fetch_continue_watching_files
 )
 
@@ -27,35 +26,33 @@ async def tv_browse(
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
-    """
-    Get TV home screen data in a single request.
-    Returns continue watching, recent files, and folders.
-    Optimized for TV client to minimize API calls.
-    """
-    # Get continue watching
+    """Get TV home screen data in a single request."""
     continue_watching = await fetch_continue_watching_files(db, current_user.id, 20)
     
-    # Get recent files
-    recent_files = await fetch_recent_files(db, current_user.id, 20)
+    recent_query = (
+        select(File)
+        .options(selectinload(File.watch_progress))
+        .order_by(desc(File.created_at))
+        .limit(20)
+    )
+    recent_files = (await db.execute(recent_query)).scalars().all()
     
-    # Get top-level folders
     folders_query = (
         select(Folder)
-        .where(Folder.user_id == current_user.id, Folder.parent_id == None)
+        .where(Folder.parent_id == None)
         .order_by(Folder.name)
     )
-    folders_result = await db.execute(folders_query)
-    folders = folders_result.scalars().all()
+    folders = (await db.execute(folders_query)).scalars().all()
     
     return {
-        "continue_watching": [add_urls_to_file(f) for f in continue_watching],
-        "recent": [add_urls_to_file(f) for f in recent_files],
+        "continue_watching": [add_urls_to_file(f, current_user.id) for f in continue_watching],
+        "recent": [add_urls_to_file(f, current_user.id) for f in recent_files],
         "folders": [
             {
                 "id": f.id,
                 "name": f.name,
                 "parent_id": f.parent_id,
-                "file_count": None  # Can be computed if needed
+                "file_count": None
             }
             for f in folders
         ]
@@ -70,7 +67,7 @@ async def tv_continue_watching(
 ):
     """Get continue watching list for TV."""
     files = await fetch_continue_watching_files(db, current_user.id, limit)
-    return [add_urls_to_file(f) for f in files]
+    return [add_urls_to_file(f, current_user.id) for f in files]
 
 
 @router.get("/recent")
@@ -80,8 +77,14 @@ async def tv_recent_files(
     current_user: User = Depends(get_current_user),
 ):
     """Get recently added files for TV."""
-    files = await fetch_recent_files(db, current_user.id, limit)
-    return [add_urls_to_file(f) for f in files]
+    recent_query = (
+        select(File)
+        .options(selectinload(File.watch_progress))
+        .order_by(desc(File.created_at))
+        .limit(limit)
+    )
+    files = (await db.execute(recent_query)).scalars().all()
+    return [add_urls_to_file(f, current_user.id) for f in files]
 
 
 @router.get("/search")
@@ -92,35 +95,25 @@ async def tv_search(
     current_user: User = Depends(get_current_user),
 ):
     """Search files for TV client."""
-    # Search files by name
     files_query = (
         select(File)
-        .where(
-            File.user_id == current_user.id,
-            File.file_name.ilike(f"%{escape_like(q)}%", escape="\\")
-        )
+        .where(File.file_name.ilike(f"%{escape_like(q)}%", escape="\\"))
         .options(selectinload(File.watch_progress))
         .order_by(desc(File.created_at))
         .limit(limit)
     )
-    files_result = await db.execute(files_query)
-    files = files_result.scalars().all()
+    files = (await db.execute(files_query)).scalars().all()
     
-    # Search folders by name
     folders_query = (
         select(Folder)
-        .where(
-            Folder.user_id == current_user.id,
-            Folder.name.ilike(f"%{escape_like(q)}%", escape="\\")
-        )
+        .where(Folder.name.ilike(f"%{escape_like(q)}%", escape="\\"))
         .order_by(Folder.name)
         .limit(20)
     )
-    folders_result = await db.execute(folders_query)
-    folders = folders_result.scalars().all()
+    folders = (await db.execute(folders_query)).scalars().all()
     
     return {
-        "files": [add_urls_to_file(f) for f in files],
+        "files": [add_urls_to_file(f, current_user.id) for f in files],
         "folders": [
             {
                 "id": f.id,
@@ -138,45 +131,32 @@ async def tv_folder_detail(
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
-    """
-    Get folder details with files and subfolders for TV client.
-    Returns folder info, subfolders, files, and parent path for navigation.
-    """
+    """Get folder details with files and subfolders for TV client."""
     from fastapi import HTTPException
     
-    # Get the folder
-    folder_result = await db.execute(
-        select(Folder).where(Folder.id == folder_id, Folder.user_id == current_user.id)
-    )
+    folder_result = await db.execute(select(Folder).where(Folder.id == folder_id))
     folder = folder_result.scalar_one_or_none()
     
     if not folder:
         raise HTTPException(status_code=404, detail="Folder not found")
     
-    # Get subfolders
     subfolders_result = await db.execute(
-        select(Folder)
-        .where(Folder.user_id == current_user.id, Folder.parent_id == folder_id)
-        .order_by(Folder.name)
+        select(Folder).where(Folder.parent_id == folder_id).order_by(Folder.name)
     )
     subfolders = subfolders_result.scalars().all()
     
-    # Get files in this folder
     files_result = await db.execute(
         select(File)
-        .where(File.user_id == current_user.id, File.folder_id == folder_id)
+        .where(File.folder_id == folder_id)
         .options(selectinload(File.watch_progress))
         .order_by(File.file_name)
     )
     files = files_result.scalars().all()
     
-    # Build parent path for breadcrumb navigation
     parent_path = []
     current_folder = folder
     while current_folder.parent_id:
-        parent_result = await db.execute(
-            select(Folder).where(Folder.id == current_folder.parent_id)
-        )
+        parent_result = await db.execute(select(Folder).where(Folder.id == current_folder.parent_id))
         parent = parent_result.scalar_one_or_none()
         if parent:
             parent_path.insert(0, {
@@ -211,6 +191,6 @@ async def tv_folder_detail(
             }
             for sf in subfolders
         ],
-        "files": [add_urls_to_file(f) for f in files],
+        "files": [add_urls_to_file(f, current_user.id) for f in files],
         "parent_path": parent_path
     }
