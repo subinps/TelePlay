@@ -65,6 +65,10 @@ app.add_middleware(
 
 @app.middleware("http")
 async def add_security_headers(request: Request, call_next):
+    # Never wrap the media stream: BaseHTTPMiddleware adds a copy hop per chunk and
+    # interferes with cancellation when the browser seeks.
+    if request.url.path.startswith("/api/stream/"):
+        return await call_next(request)
     response = await call_next(request)
     response.headers["X-Content-Type-Options"] = "nosniff"
     response.headers["X-Frame-Options"] = "SAMEORIGIN"
@@ -82,7 +86,11 @@ app.include_router(playback.router, prefix="/api")
 
 @app.get("/health")
 async def health():
-    return {"status": "healthy"}
+    from .byte_cache import get_cache_stats
+    return {
+        "status": "healthy",
+        "cache": get_cache_stats()
+    }
 
 if __name__ == "__main__":
     import uvicorn

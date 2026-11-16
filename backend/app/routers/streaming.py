@@ -1,41 +1,70 @@
 """
-Streaming API endpoints for media playback.
-Based on Claude's Hearth upgrade plan.
+backend/app/routers/streaming.py — HTTP layer for media playback.
+Hearth upgrade plan §4.6 / §4.7 / §8.3.
+
+Includes:
+  · P2 byte cache for instant cold starts (first 512 KB cached in RAM)
+  · 16 MB window cap for safe seeking
+  · Signed per-file, per-device stream tokens
+  · HEAD support for TV browsers
+  · Header-auth thumbnails
 """
-import re
-import time
+from __future__ import annotations
+
 import asyncio
 import logging
+import re
+import time
 from dataclasses import dataclass
+from typing import Optional, Tuple
 from urllib.parse import quote
-from fastapi import APIRouter, Depends, HTTPException, Request, Response, Query
+
+from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response
 from fastapi.responses import StreamingResponse
 from sqlalchemy import select
-from sqlalchemy.ext.asyncio import AsyncSession
 
-from ..database import get_db, async_session
+from ..byte_cache import HEAD_CACHE_SIZE, cache_head, get_cached_head, get_cache_stats
+from ..database import async_session
 from ..models import File, User
 from ..auth import get_current_user, verify_stream_token
 from ..playback import limiter
 from .. import telegram
 from ..telegram import get_message_from_channel
-from ..streaming import prepare_stream, stream_file as stream_file_generator, forget_message
+from ..streaming import (
+    MessageGone,
+    StreamUnavailable,
+    forget_message,
+    message_file_size,
+    prepare_stream,
+    stream_file as stream_file_generator,
+)
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/stream", tags=["Streaming"])
 
-# ---------- Range parsing ----------
+# Serve at most this many bytes per 206 response. A browser that asked "bytes=X-"
+# accepts a shorter 206 and requests the next window itself (same trick nginx's
+# slice module uses). A Telegram timeout then costs 16 MiB, not the whole file.
+MAX_WINDOW = 16 * 1024 * 1024
+
+# ───────────────────────── Range parsing ─────────────────────────
+
 _RANGE_RE = re.compile(r"^bytes=(\d*)-(\d*)$")
 
-def parse_range_header(range_header: str | None, file_size: int) -> tuple[int, int, int]:
+
+def parse_range_header(range_header: Optional[str], file_size: int) -> Tuple[int, int, int]:
     """Returns (start, end, status). Supports open-ended and suffix ranges (bytes=-500)."""
+    if file_size <= 0:
+        return 0, 0, 416
     if not range_header:
         return 0, file_size - 1, 200
+
     m = _RANGE_RE.match(range_header.strip())
     if not m or (m.group(1) == "" and m.group(2) == ""):
         return 0, file_size - 1, 200
+
     s, e = m.groups()
-    if s == "":  # suffix: last N bytes
+    if s == "":                                   # suffix: last N bytes
         n = int(e)
         if n == 0:
             return 0, 0, 416
@@ -43,77 +72,127 @@ def parse_range_header(range_header: str | None, file_size: int) -> tuple[int, i
     else:
         start = int(s)
         end = int(e) if e else file_size - 1
+
     if start >= file_size or start > end:
         return start, end, 416
     return start, min(end, file_size - 1), 206
 
-# ---------- tiny metadata cache: no DB hit per seek ----------
+
+# ───────────────────────── metadata cache ─────────────────────────
+
 @dataclass
 class FileMeta:
-    id: int; size: int; mime: str; name: str; message_id: int; thumb_unique: str | None
+    id: int
+    size: int
+    mime: str
+    name: str
+    message_id: int
+    thumb_unique: Optional[str]
 
-_meta: dict[int, tuple[float, FileMeta]] = {}
+
+_meta: dict[int, Tuple[float, FileMeta]] = {}
 META_TTL = 300
 
-async def get_meta(file_id: int) -> FileMeta | None:
+_thumbs: dict[int, bytes] = {}
+_thumb_miss: dict[int, float] = {}
+THUMB_CACHE_MAX = 64
+THUMB_MISS_TTL = 60
+
+
+async def get_meta(file_id: int) -> Optional[FileMeta]:
     hit = _meta.get(file_id)
     if hit and time.monotonic() - hit[0] < META_TTL:
         return hit[1]
+
     async with async_session() as db:
         f = (await db.execute(select(File).where(File.id == file_id))).scalar_one_or_none()
     if not f:
         return None
-    m = FileMeta(f.id, f.file_size, f.mime_type or "application/octet-stream", f.file_name,
-                 f.channel_message_id, f.thumbnail_file_id)
+
+    m = FileMeta(
+        f.id,
+        int(f.file_size or 0),
+        f.mime_type or "application/octet-stream",
+        f.file_name,
+        f.channel_message_id,
+        f.thumbnail_file_id,
+    )
     _meta[file_id] = (time.monotonic(), m)
     return m
 
-def invalidate_meta(file_id: int, message_id: int | None = None) -> None:
+
+def _heal_size(file_id: int, meta: FileMeta, real_size: int) -> FileMeta:
+    """Telegram is the source of truth for size; fix rows imported without one."""
+    if real_size > 0 and meta.size != real_size:
+        meta = FileMeta(meta.id, real_size, meta.mime, meta.name, meta.message_id, meta.thumb_unique)
+        _meta[file_id] = (time.monotonic(), meta)
+    return meta
+
+
+def invalidate_meta(file_id: int, message_id: Optional[int] = None) -> None:
     _meta.pop(file_id, None)
     _thumbs.pop(file_id, None)
+    _thumb_miss.pop(file_id, None)
     if message_id is not None:
         forget_message(message_id)
 
-# ---------- stream ----------
-@router.get("/{file_id}")
-async def stream_file(file_id: int, request: Request, t: str, download: int = Query(0)):
+
+# ───────────────────────── shared resolution ─────────────────────────
+
+async def _resolve(request: Request, file_id: int, t: Optional[str], download: int = 0):
+    """Authenticate, (re)register the device, resolve the message, work out the byte range."""
+    if not t:
+        raise HTTPException(401, "Missing stream token. Start playback via /api/playback/start.")
+
     claims = verify_stream_token(t, file_id)
     device_id = claims["did"]
-    
-    # If the server restarted, silently re-register the device
+
+    # Server restarted, or the slot expired during a long pause: re-register silently.
     if not limiter.is_active(device_id):
-        ok, _ = limiter.start(device_id, claims.get("lbl", "Device"), claims["role"], file_id)
+        ok, _active = limiter.start(device_id, claims.get("lbl", "Device"), claims["role"], file_id)
         if not ok:
             raise HTTPException(403, detail={"code": "DEVICE_LIMIT"})
+    else:
+        limiter.heartbeat(device_id, file_id)
 
     meta = await get_meta(file_id)
     if not meta:
         raise HTTPException(404, "File not found")
 
-    start, end, status = parse_range_header(request.headers.get("range"), meta.size)
-    if status == 416:
-        return Response(status_code=416, headers={"Content-Range": f"bytes */{meta.size}"})
+    try:
+        ctx = await prepare_stream(meta.message_id)
+    except StreamUnavailable as e:
+        # Transient: NEVER delete anything for this.
+        logger.warning("stream unavailable file=%s: %s", file_id, e)
+        raise HTTPException(503, detail={"code": "STREAM_UNAVAILABLE", "message": str(e)})
 
-    ctx = await prepare_stream(meta.message_id)
     if not ctx:
-        # Dead message: cleanup DB
+        # Confirmed gone: the storage-channel message no longer exists.
         async with async_session() as db:
             f = (await db.execute(select(File).where(File.id == file_id))).scalar_one_or_none()
             if f:
-                await db.delete(f); await db.commit()
-        invalidate_meta(file_id)
+                await db.delete(f)
+                await db.commit()
+        invalidate_meta(file_id, meta.message_id)
         raise HTTPException(404, detail={"code": "FILE_GONE"})
 
-    async def body():
-        try:
-            async for chunk in stream_file_generator(ctx, start, end):
-                yield chunk
-        except asyncio.CancelledError:
-            raise  # Browser seeked / closed
-        except Exception:
-            logger.exception("stream failed file=%s range=%s-%s", file_id, start, end)
-            raise
+    meta = _heal_size(file_id, meta, message_file_size(ctx[0][2]))
+    if meta.size <= 0:
+        raise HTTPException(503, detail={"code": "SIZE_UNKNOWN", "message": "Telegram reported no file size."})
 
+    # 1) parse the client's Range header  ── this line MUST exist before the cap
+    start, end, status = parse_range_header(request.headers.get("range"), meta.size)
+
+    # 2) bound the window for playback only (a real download must get the whole file)
+    if download == 0 and status != 416 and (end - start + 1) > MAX_WINDOW:
+        end = start + MAX_WINDOW - 1
+        status = 206                      # a capped body must be 206, never a short 200
+        logger.debug("stream window capped file=%s %s-%s/%s", file_id, start, end, meta.size)
+
+    return meta, ctx, start, end, status
+
+
+def _headers(meta: FileMeta, start: int, end: int, status: int, download: int) -> dict:
     disposition = "attachment" if download else "inline"
     headers = {
         "Content-Type": meta.mime,
@@ -125,33 +204,194 @@ async def stream_file(file_id: int, request: Request, t: str, download: int = Qu
     }
     if status == 206:
         headers["Content-Range"] = f"bytes {start}-{end}/{meta.size}"
-    return StreamingResponse(body(), status_code=status, headers=headers)
+    return headers
 
-# ---------- thumbnails: header-auth, cached ----------
-_thumbs: dict[int, bytes] = {}
-THUMB_CACHE_MAX = 64
+
+# ───────────────────────── P2: Byte cache helpers ─────────────────────────
+
+async def _populate_cache_from_telegram(file_id: int, message_id: int) -> None:
+    """Fetch the first 512 KB from Telegram and cache it (runs in background)."""
+    try:
+        ctx = await prepare_stream(message_id)
+        if not ctx:
+            return
+        
+        chunks = []
+        total = 0
+        async for chunk in stream_file_generator(ctx, 0, HEAD_CACHE_SIZE - 1):
+            chunks.append(chunk)
+            total += len(chunk)
+            if total >= HEAD_CACHE_SIZE:
+                break
+        
+        if chunks:
+            head_data = b''.join(chunks)
+            cache_head(file_id, head_data)
+            logger.info("P2: Cached %d bytes for file_id=%d", len(head_data), file_id)
+    except Exception as e:
+        logger.warning("P2: Failed to cache head for file_id=%d: %s", file_id, e)
+
+
+def _try_cache_hit(file_id: int, range_header: Optional[str], meta: FileMeta) -> Optional[Response]:
+    """Check if this is a head request we can serve from cache. Returns Response or None."""
+    if not range_header:
+        return None
+    
+    match = re.match(r"bytes=(\d+)-(\d+)?", range_header)
+    if not match:
+        return None
+    
+    start_byte = int(match.group(1))
+    end_byte_str = match.group(2)
+    
+    # Only serve from cache if requesting from byte 0 (the head)
+    if start_byte != 0:
+        return None
+    
+    cached = get_cached_head(file_id)
+    if cached is None:
+        return None
+    
+    # Determine the end byte
+    if end_byte_str:
+        end_byte = min(int(end_byte_str), len(cached) - 1)
+    else:
+        end_byte = len(cached) - 1
+    
+    if end_byte < start_byte:
+        return None
+    
+    data = cached[start_byte:end_byte + 1]
+    
+    logger.info("P2: Cache HIT for file_id=%d bytes=%d-%d (%d bytes)", 
+                file_id, start_byte, end_byte, len(data))
+    
+    return Response(
+        content=data,
+        status_code=206,
+        headers={
+            "Content-Type": meta.mime,
+            "Content-Range": f"bytes {start_byte}-{end_byte}/{meta.size}",
+            "Content-Length": str(len(data)),
+            "Accept-Ranges": "bytes",
+            "Cache-Control": "public, max-age=3600",
+            "X-Accel-Buffering": "no",
+        }
+    )
+
+
+# ───────────────────────── stream ─────────────────────────
+
+@router.get("/{file_id}")
+async def stream_file(
+    file_id: int,
+    request: Request,
+    t: Optional[str] = Query(None, description="Signed per-file, per-device stream token"),
+    download: int = Query(0),
+):
+    # P2: Try cache first for head requests (instant start!)
+    meta = await get_meta(file_id)
+    if meta:
+        cache_response = _try_cache_hit(file_id, request.headers.get("range"), meta)
+        if cache_response is not None:
+            return cache_response
+    
+    # Cache miss or not a head request — proceed with normal streaming
+    meta, ctx, start, end, status = await _resolve(request, file_id, t, download)
+
+    if status == 416:
+        return Response(status_code=416, headers={"Content-Range": f"bytes */{meta.size}"})
+
+    async def body():
+        try:
+            async for chunk in stream_file_generator(ctx, start, end):
+                yield chunk
+        except asyncio.CancelledError:
+            raise                                   # browser seeked or closed — normal
+        except MessageGone:
+            invalidate_meta(file_id, meta.message_id)
+            logger.warning("stream file=%s vanished mid-play", file_id)
+            raise
+        except Exception:
+            logger.exception("stream failed file=%s range=%s-%s", file_id, start, end)
+            raise
+
+    # P2: After first successful stream of the head, populate the cache
+    # Only cache if this is a head request (bytes 0-*)
+    if start == 0:
+        asyncio.create_task(_populate_cache_from_telegram(file_id, meta.message_id))
+
+    return StreamingResponse(body(), status_code=status, headers=_headers(meta, start, end, status, download))
+
+
+@router.head("/{file_id}")
+async def stream_file_head(
+    file_id: int,
+    request: Request,
+    t: Optional[str] = Query(None),
+    download: int = Query(0),
+):
+    """Some TV browsers probe with HEAD before playing."""
+    meta, _ctx, start, end, status = await _resolve(request, file_id, t, download)
+    if status == 416:
+        return Response(status_code=416, headers={"Content-Range": f"bytes */{meta.size}"})
+    return Response(status_code=status, headers=_headers(meta, start, end, status, download))
+
+
+# ───────────────────────── thumbnails (header-auth) ─────────────────────────
 
 @router.get("/{file_id}/thumbnail")
 async def get_thumbnail(file_id: int, current_user: User = Depends(get_current_user)):
-    if file_id in _thumbs:
-        return Response(_thumbs[file_id], media_type="image/jpeg", headers={"Cache-Control": "private, max-age=604800"})
-    
+    cached = _thumbs.get(file_id)
+    if cached is not None:
+        _thumbs[file_id] = _thumbs.pop(file_id)      # LRU touch
+        return Response(cached, media_type="image/jpeg",
+                        headers={"Cache-Control": "private, max-age=604800"})
+
+    miss = _thumb_miss.get(file_id)
+    if miss and time.monotonic() - miss < THUMB_MISS_TTL:
+        raise HTTPException(404, "Thumbnail not found")
+
     meta = await get_meta(file_id)
     if not meta or not meta.thumb_unique:
+        _thumb_miss[file_id] = time.monotonic()
         raise HTTPException(404, "Thumbnail not found")
-        
-    message = await get_message_from_channel(meta.message_id)
-    if not message:
+
+    try:
+        message = await get_message_from_channel(meta.message_id)
+    except Exception as e:
+        logger.warning("thumbnail lookup failed file=%s: %s", file_id, e)
+        raise HTTPException(503, detail={"code": "STREAM_UNAVAILABLE"})
+
+    if not message or getattr(message, "empty", False):
+        _thumb_miss[file_id] = time.monotonic()
         raise HTTPException(404, "Message not found")
-        
+
     media = message.video or message.document or message.audio
     thumbs = getattr(media, "thumbs", None) or []
     if not thumbs:
+        _thumb_miss[file_id] = time.monotonic()
         raise HTTPException(404, "Thumbnail not found in message")
-        
-    data = (await telegram.tg_client.download_media(thumbs[-1].file_id, in_memory=True)).getvalue()
-    
-    if len(_thumbs) >= THUMB_CACHE_MAX:
+
+    try:
+        buf = await telegram.tg_client.download_media(thumbs[-1].file_id, in_memory=True)
+    except Exception as e:
+        logger.warning("thumbnail download failed file=%s: %s", file_id, e)
+        raise HTTPException(503, detail={"code": "STREAM_UNAVAILABLE"})
+
+    if buf is None:
+        _thumb_miss[file_id] = time.monotonic()
+        raise HTTPException(404, "Thumbnail not available")
+
+    data = buf.getvalue()
+    if not data:
+        _thumb_miss[file_id] = time.monotonic()
+        raise HTTPException(404, "Thumbnail empty")
+
+    while len(_thumbs) >= THUMB_CACHE_MAX:
         _thumbs.pop(next(iter(_thumbs)))
     _thumbs[file_id] = data
-    return Response(data, media_type="image/jpeg", headers={"Cache-Control": "private, max-age=604800"})
+    _thumb_miss.pop(file_id, None)
+
+    return Response(data, media_type="image/jpeg",
+                    headers={"Cache-Control": "private, max-age=604800"})

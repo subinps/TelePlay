@@ -31,7 +31,7 @@
  */
 import axios from 'axios';
 import type { AxiosError, AxiosRequestConfig } from 'axios';
-import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
+import { QueryClient, useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import type { UseMutationResult, UseQueryResult } from '@tanstack/react-query';
 import { useEffect, useState } from 'react';
 import { getDeviceId, getDeviceLabel } from './device';
@@ -308,7 +308,7 @@ export const qk = {
     folders: () => ['folders'] as const,
     folderTree: () => ['folder-tree'] as const,
     me: () => ['me'] as const,
-    botInfo: () => ['bot-info'] as const,
+    botInfo: () => ['bot/info'] as const,
     activeDevices: () => ['playback', 'active'] as const,
 };
 
@@ -405,7 +405,7 @@ export async function fetchMe(): Promise<Me> {
 
 export async function fetchBotInfo(): Promise<BotInfo> {
     try {
-        const { data } = await api.get('/auth/bot-info');
+        const { data } = await api.get('/auth/bot/info');
         return normaliseBotInfo(data);
     } catch {
         return { bot_username: '', bot_link: '' };
@@ -547,7 +547,7 @@ export async function deleteFile(id: number): Promise<void> {
 export async function deleteFiles(ids: number[]): Promise<void> {
     if (!ids.length) return;
     try {
-        await api.post('/files/batch-delete', { file_ids: ids });
+        await api.post('/files/batch-delete', ids);
     } catch (e) {
         if (!routeMissing(e)) throw e;
         try {
