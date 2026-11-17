@@ -18,7 +18,6 @@ from pyrogram.types import (
 from sqlalchemy import func, select
 
 from .auth import (
-    create_access_token,
     hash_pin,
     revoke_guest_tokens,
 )
@@ -123,14 +122,24 @@ async def get_or_create_user(
         return user
 
 
-def get_web_app_button(
+async def get_web_app_button(
     telegram_id: int, text: str = "🌐 Open Web"
 ) -> InlineKeyboardButton:
-    from urllib.parse import quote
+    # Generate a one-time code bound to this Telegram user (same flow as /login)
+    alphabet = "ABCDEFGHJKMNPQRSTUVWXYZ23456789"
+    code = "".join(secrets.choice(alphabet) for _ in range(6))
 
-    token = create_access_token(telegram_id)
-    encoded_token = quote(token, safe="")
-    web_url = f"{settings.web_base_url}/auth?token={encoded_token}"
+    async with async_session() as db:
+        db.add(
+            LoginCode(
+                code=code,
+                telegram_id=telegram_id,
+                expires_at=datetime.utcnow() + timedelta(minutes=2),
+            )
+        )
+        await db.commit()
+
+    web_url = f"{settings.web_base_url}/auth?code={code}"
 
     if "localhost" in web_url or "127.0.0.1" in web_url:
         return InlineKeyboardButton(
@@ -221,7 +230,11 @@ async def start_command(client, message: Message):
         "💡 Use `/file <id>` to rename, move, or delete.",
         reply_markup=InlineKeyboardMarkup(
             [
-                [get_web_app_button(message.from_user.id, "🌐 Open Web Interface")],
+                [
+                    await get_web_app_button(
+                        message.from_user.id, "🌐 Open Web Interface"
+                    )
+                ],
                 [
                     InlineKeyboardButton("📁 Library", callback_data="show_files"),
                     InlineKeyboardButton("📂 Folders", callback_data="back_folders"),
@@ -296,7 +309,7 @@ async def myfiles_command(client, message: Message):
         reply_markup=InlineKeyboardMarkup(
             [
                 [InlineKeyboardButton("📂 Folders", callback_data="back_folders")],
-                [get_web_app_button(message.from_user.id, "🌐 Open Web")],
+                [await get_web_app_button(message.from_user.id, "🌐 Open Web")],
             ]
         ),
     )
@@ -434,10 +447,10 @@ async def web_command(client, message: Message):
         message.from_user.first_name,
         message.from_user.last_name,
     )
-    token = create_access_token(message.from_user.id)
-    web_url = f"{settings.web_base_url}/auth?token={token}"
+    btn = await get_web_app_button(message.from_user.id, "🚀 Open Web Interface")
     await message.reply(
-        f"🌐 **Web Interface**\n\n👉 {web_url}\n\n__(Link expires in 15 minutes)__"
+        "🌐 **Web Interface**\n\nClick the button below to log in instantly.",
+        reply_markup=InlineKeyboardMarkup([[btn]]),
     )
 
 
@@ -649,13 +662,10 @@ async def handle_callback(client, callback: CallbackQuery):
         await callback.answer()
 
     elif data == "get_web_link":
-        token = create_access_token(callback.from_user.id)
-        web_url = f"{settings.web_base_url}/auth?token={token}"
+        btn = await get_web_app_button(callback.from_user.id, "🚀 Open Web Interface")
         await callback.message.reply(
-            f"🌐 **Web Interface**\n\n👉 {web_url}\n\n__(Link expires in 15 minutes)__",
-            reply_markup=InlineKeyboardMarkup(
-                [[get_web_app_button(callback.from_user.id, "🚀 Open Mini App")]]
-            ),
+            "🌐 **Web Interface**\n\nClick the button below to log in instantly.",
+            reply_markup=InlineKeyboardMarkup([[btn]]),
         )
         await callback.answer()
 
@@ -686,7 +696,7 @@ async def handle_callback(client, callback: CallbackQuery):
             reply_markup=InlineKeyboardMarkup(
                 [
                     [InlineKeyboardButton("📂 Folders", callback_data="back_folders")],
-                    [get_web_app_button(callback.from_user.id, "🌐 Open Web")],
+                    [await get_web_app_button(callback.from_user.id, "🌐 Open Web")],
                 ]
             ),
         )

@@ -26,7 +26,7 @@ import {
 } from 'lucide-react';
 import {
     AUTH_EXPIRED_EVENT, errorMessage, errorStatus, fetchBotInfo, fetchMe, getAccessToken,
-    loginWithCode, loginWithPin, useDeleteFiles, useDeleteFolders,
+    loginWithCode, isAuthenticated, loginWithPin, useDeleteFiles, useDeleteFolders,
 } from './lib/api';
 import type { Folder, TelegramFile } from './lib/api';
 import { getDeviceKind, getDeviceLabel } from './lib/device';
@@ -815,6 +815,26 @@ function HearthApp() {
     const deleteFilesMutation = useDeleteFiles();
     const deleteFoldersMutation = useDeleteFolders();
     const [deleting, setDeleting] = useState(false);
+
+    // Inside your main App component function:
+    useEffect(() => {
+    const params = new URLSearchParams(window.location.search);
+    const code = params.get('code');
+  
+    // If we have a code and aren't already logged in, exchange it
+    if (code && !isAuthenticated()) {
+        loginWithCode(code)
+        .then(() => {
+            // Success! Scrub the code from the URL history so it can't be reused
+            window.history.replaceState({}, document.title, window.location.pathname);
+        })
+        .catch((err) => {
+            console.error("Auto-login failed:", err);
+            // Scrub it anyway so they don't get stuck in an error loop
+            window.history.replaceState({}, document.title, window.location.pathname);
+        });
+  }
+    }, []);
 
     /* Verify the session once, hydrate role, never dead-end. */
     useEffect(() => {
