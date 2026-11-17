@@ -1,37 +1,38 @@
 """
 Authentication API endpoints.
 """
-from datetime import datetime, timedelta
+import hashlib  # noqa: F401
 import hmac
-import hashlib
+from datetime import datetime, timedelta
+
 from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel, Field
-from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy import select
 from slowapi import Limiter
 from slowapi.util import get_remote_address
+from sqlalchemy import select
+from sqlalchemy.ext.asyncio import AsyncSession
 
-from ..database import get_db
-from ..models import User, LoginCode, GuestCredential
-from ..schemas import (
-    Token, 
-    UserResponse, 
-    LoginCodeRequest,
-    LoginCodeResponse, 
-    VerifyCodeRequest, 
-    AuthResponse,
-    RefreshTokenRequest,
-    BotInfoResponse
-)
+from .. import telegram
 from ..auth import (
     create_access_token,
     create_refresh_token,
-    verify_token,
-    verify_token_payload,
     get_current_user,
-    hash_pin
+    hash_pin,
+    verify_token,  # noqa: F401
+    verify_token_payload,
 )
-from .. import telegram
+from ..database import get_db
+from ..models import GuestCredential, LoginCode, User
+from ..schemas import (
+    AuthResponse,
+    BotInfoResponse,
+    LoginCodeRequest,
+    LoginCodeResponse,
+    RefreshTokenRequest,
+    Token,
+    UserResponse,
+    VerifyCodeRequest,
+)
 
 # Get limiter from main app
 limiter = Limiter(key_func=get_remote_address)

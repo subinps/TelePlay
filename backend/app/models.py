@@ -2,9 +2,20 @@
 Database models for TelePlay streaming app.
 """
 from datetime import datetime
-from typing import Optional, List
-from sqlalchemy import BigInteger, String, Integer, Boolean, ForeignKey, DateTime, Text, Index
+from typing import List, Optional  # noqa: UP035
+
+from sqlalchemy import (
+    BigInteger,
+    Boolean,
+    DateTime,
+    ForeignKey,
+    Index,
+    Integer,
+    String,
+    Text,  # noqa: F401
+)
 from sqlalchemy.orm import Mapped, mapped_column, relationship
+
 from .database import Base
 
 

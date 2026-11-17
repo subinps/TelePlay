@@ -2,23 +2,24 @@
 File management API endpoints.
 """
 from typing import Optional
+
 from fastapi import APIRouter, Depends, HTTPException, Query
+from sqlalchemy import func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy import select, func, update
 from sqlalchemy.orm import selectinload
 
-from ..database import get_db
-from ..models import File, User, WatchProgress, Folder
-from ..schemas import FileResponse, FileListResponse, FileUpdate, WatchProgressUpdate
 from ..auth import get_current_user
-from ..telegram import delete_from_storage_channel
 from ..config import get_settings
+from ..database import get_db
+from ..models import File, Folder, User, WatchProgress
+from ..schemas import FileListResponse, FileResponse, FileUpdate, WatchProgressUpdate
 from ..services import (
-    escape_like, 
-    sanitize_filename, 
-    add_urls_to_file, 
-    fetch_continue_watching_files
+    add_urls_to_file,
+    escape_like,
+    fetch_continue_watching_files,
+    sanitize_filename,
 )
+from ..telegram import delete_from_storage_channel
 from .streaming import invalidate_meta
 
 router = APIRouter(prefix="/files", tags=["Files"])

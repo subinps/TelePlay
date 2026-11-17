@@ -15,10 +15,22 @@ from slowapi.util import get_remote_address
 from .byte_cache import get_cache_stats
 from .config import get_settings
 from .database import init_db
-from .routers import auth_router, files_router, folders_router, playback, streaming_router, tv_router
+from .routers import (
+    auth_router,
+    files_router,
+    folders_router,
+    playback,
+    streaming_router,
+    tv_router,
+)
 from .telegram import start_telegram_client, stop_telegram_client
 
-logging.getLogger("pyrogram").setLevel(logging.INFO)
+# Make application logs visible (uvicorn only configures its own loggers by default).
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s %(levelname)-8s %(name)s: %(message)s",
+)
+logging.getLogger("pyrogram").setLevel(logging.WARNING)
 logger = logging.getLogger(__name__)
 settings = get_settings()
 

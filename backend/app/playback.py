@@ -6,6 +6,8 @@ import time
 from dataclasses import dataclass, field
 from typing import Callable, List
 
+from .config import get_settings
+
 @dataclass
 class PlaybackSession:
     device_id: str
@@ -76,5 +78,5 @@ class PlaybackLimiter:
         for k in [k for k, v in self._sessions.items() if v.role == role]:
             del self._sessions[k]
 
-# Instantiate the global limiter for the app
-limiter = PlaybackLimiter()
+# Instantiate the global limiter for the app (wired to validated settings)
+limiter = PlaybackLimiter(max_devices=get_settings().max_playback_devices)

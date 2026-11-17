@@ -2,8 +2,10 @@
 
 # Telegram MTProto Client
 pyrotgfork>=2.2.0
-# TgCrypto>=1.2.3
-TgrCrypto
+# Fast C crypto (maintained PyroTGFork fork; provides the `tgcrypto` module).
+# Ships cp313 + cp314 wheels. If client.start() ever raises a bytearray TypeError
+# on your platform, comment this out — Pyrogram falls back to pyaes (slower).
+TgCrypto-pyrofork>=1.2.8
 
 # Web Framework
 fastapi>=0.109.0
@@ -30,4 +32,4 @@ aiofiles>=23.2.0
 # Rate Limiting
 slowapi>=0.1.9
 
-psutil==5.9.8
+psutil>=6.1.0
