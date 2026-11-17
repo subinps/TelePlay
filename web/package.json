@@ -10,18 +10,14 @@
         "lint": "eslint . --ext ts,tsx --report-unused-disable-directives --max-warnings 0"
     },
     "dependencies": {
-        "react": "^18.2.0",
-        "react-dom": "^18.2.0",
-        "react-router-dom": "^6.21.0",
         "@tanstack/react-query": "^5.17.0",
         "axios": "^1.6.0",
-        "zustand": "^4.4.0",
-        "@dnd-kit/core": "^6.1.0",
-        "@dnd-kit/sortable": "^8.0.0",
-        "@dnd-kit/utilities": "^3.2.2",
+        "clsx": "^2.1.0",
         "lucide-react": "^0.303.0",
+        "react": "^18.2.0",
+        "react-dom": "^18.2.0",
         "video.js": "^8.6.0",
-        "clsx": "^2.1.0"
+        "zustand": "^4.4.0"
     },
     "devDependencies": {
         "@types/react": "^18.2.43",
@@ -29,6 +25,7 @@
         "@types/video.js": "^7.3.0",
         "@typescript-eslint/eslint-plugin": "^6.14.0",
         "@typescript-eslint/parser": "^6.14.0",
+        "@vitejs/plugin-legacy": "^5.4.3",
         "@vitejs/plugin-react": "^4.2.1",
         "autoprefixer": "^10.4.16",
         "eslint": "^8.55.0",
@@ -36,6 +33,7 @@
         "eslint-plugin-react-refresh": "^0.4.5",
         "postcss": "^8.4.32",
         "tailwindcss": "^3.4.0",
+        "terser": "^5.51.2",
         "typescript": "^5.2.2",
         "vite": "^5.0.8"
     }

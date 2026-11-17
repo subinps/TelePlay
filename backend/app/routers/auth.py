@@ -39,8 +39,13 @@ limiter = Limiter(key_func=get_remote_address)
 
 router = APIRouter(prefix="/auth", tags=["Authentication"])
 
+class VerifyCodeIn(BaseModel):
+    # Family code MUST be exactly 8 digits
+    code: str = Field(..., min_length=8, max_length=8, pattern=r"^\d{8}$")
+
 class GuestLogin(BaseModel):
-    pin: str = Field(pattern=r"^\d{6}$")
+    # Guest PIN MUST be exactly 6 digits
+    pin: str = Field(..., min_length=6, max_length=6, pattern=r"^\d{6}$")
 
 
 async def get_or_create_guest_user(db: AsyncSession) -> User:
@@ -75,7 +80,7 @@ async def get_bot_info_endpoint():
 
 
 @router.post("/guest/login", response_model=AuthResponse)
-@limiter.limit("5/minute")
+@limiter.limit("5/hour")  # Max 5 attempts per hour per IP
 async def guest_login(
     request: Request,
     body: GuestLogin,
@@ -202,7 +207,7 @@ async def generate_login_code(
 
 
 @router.post("/verify-code", response_model=AuthResponse)
-@limiter.limit("40/minute")
+@limiter.limit("5/hour")
 async def verify_login_code(
     request: Request,
     code_request: VerifyCodeRequest,
@@ -255,3 +260,5 @@ async def login_with_code(
    """Legacy endpoint."""
    res = await verify_login_code(request, VerifyCodeRequest(code=code_request.code), db)
    return Token(access_token=res.access_token, refresh_token=res.refresh_token)
+
+# end

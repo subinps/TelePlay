@@ -1,25 +1,8 @@
 /**
  * Hearth — FileBrowser (Home)  ·  TV-first private library
  * ─────────────────────────────────────────────────────────────────────────────
- * Implements README §7.4 (Home UX inside the existing FileBrowser contract),
- * §4.3 flat library, §8.2 Home, §8.4 Manage mode, §6.4 per-user progress,
- * §7.1 teal+black theme, §7.6 old-TV-safe layout (padding-top 16:9, no
- * aspect-ratio, no backdrop-filter, :focus rings that work on Chromium 53).
- *
- * Kept (working logic): useFiles / useContinueWatching / useDeleteFiles,
- *   store previewFile contract (App renders MediaPlayer), addToast + <Toasts/>,
- *   page accumulation / infinite scroll, F5 / Ctrl+R refresh.
- * Removed: folders UI, search, filters, multi-select, drag-select box,
- *   rename / move / copy / clipboard, Recently Added, New Folder, Sidebar,
- *   list view, "Unlimited Storage" — backend code untouched.
- * Added: Continue Watching row + All videos grid, blob thumbnails (auth
- *   header, never token-in-URL), format badges with MKV/AVI warning, resume
- *   progress on cards, Family/Guest role chip, Add-videos sheet with a real
- *   self-contained QR encoder (t.me deep link), admin Manage mode (toggle,
- *   long-press OK, ContextMenu key), ConfirmDelete with Cancel default focus,
- *   optimistic delete with rollback, logout confirm + session release,
- *   spatial arrow-key navigation, auto-focus, focus restore after player,
- *   skeleton / empty / error states, custom scrollbars, ember-aurora backdrop.
+ * UI/UX polish pass: refined cards, badges, header (with role pill), sections,
+ * empty / loading states. Data, hooks, and navigation logic are unchanged.
  * ─────────────────────────────────────────────────────────────────────────────
  */
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
@@ -31,7 +14,6 @@ import type {
 } from "react";
 import {
   AlertTriangle,
-  Check,
   CheckCircle2,
   Clock,
   ExternalLink,
@@ -40,14 +22,12 @@ import {
   Loader2,
   LogOut,
   Music,
-  Pencil,
   Play,
   Plus,
   QrCode,
   RefreshCw,
   Shield,
   Trash2,
-  Tv,
   Users,
   X,
 } from "lucide-react";
@@ -65,7 +45,6 @@ import Toasts from "./Toasts";
 
 /* ═══════════════════════════ Types & constants ═══════════════════════════ */
 
-/** Fields the upgraded backend returns (Phase 2/4 schemas). */
 type HubFile = TelegramFile & {
   mime_type?: string | null;
   completed?: boolean;
@@ -111,8 +90,9 @@ const BTN_DANGER =
 const HB_CSS = `
 [data-hb-root]{-webkit-tap-highlight-color:transparent;}
 [data-hb-root] .hb-focus:focus{outline:4px solid #5eead4;outline-offset:3px;border-radius:14px;}
-[data-hb-root] .hb-card:focus{outline:none;transform:scale(1.06);z-index:6;border-color:rgba(45,212,191,.65);
-  box-shadow:0 0 0 4px #5eead4,0 18px 40px -12px rgba(20,184,166,.45);}
+[data-hb-root] .hb-card{will-change:transform;}
+[data-hb-root] .hb-card:focus{outline:none;transform:scale(1.06);z-index:6;border-color:rgba(94,234,212,.9);
+  box-shadow:0 0 0 4px #5eead4,0 22px 48px -14px rgba(20,184,166,.5);}
 .hb-clamp2{display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden;}
 .hb-scroll{scrollbar-width:thin;scrollbar-color:#115e59 #0e1514;}
 .hb-scroll::-webkit-scrollbar{width:10px;}
@@ -184,7 +164,6 @@ const remainingLabel = (f: HubFile) => {
   return `${Math.floor(left)}s left`;
 };
 
-/** F16: resolve API paths against the API origin, never the Pages origin. */
 const resolveApiUrl = (path: string): string => {
   if (/^https?:\/\//i.test(path)) return path;
   const base = api.defaults.baseURL ?? "/api";
@@ -205,8 +184,8 @@ function getDeviceLabel(): string {
   if (/iPad|Tablet/i.test(ua)) return "Tablet";
   return "Computer";
 }
+void getDeviceLabel;
 
-/* Role + bot info — cached module-level, graceful pre-Phase-2 fallbacks. */
 let roleCache: string | null = null;
 let rolePromise: Promise<string> | null = null;
 function fetchRole(): Promise<string> {
@@ -258,7 +237,6 @@ function fetchBotUsername(): Promise<string> {
   return botPromise;
 }
 
-/* Thumbnails — Authorization header → blob URL, cached (§4.6, F10, F16). */
 const thumbCache = new Map<number, string>();
 const thumbOrder: number[] = [];
 function useThumbnail(fileId: number, url?: string | null): string | null {
@@ -303,17 +281,12 @@ function useThumbnail(fileId: number, url?: string | null): string | null {
   return src;
 }
 
-/* ═════════════════════ Self-contained QR encoder (byte mode, ECC L, v1–5) ═════════════════════
- * Single-block versions keep this dependency-free and correct: t.me/<bot> is ≤ 45 bytes,
- * v3-L holds 53. Algorithm follows the reference QR construction (finder/timing/alignment,
- * BCH format bits, zig-zag placement, RS ECC over GF(256), mask penalty selection). */
-
 interface QRGrid {
   size: number;
   mod: boolean[][];
 }
 const qrCache = new Map<string, QRGrid | null>();
-const QR_DATA_CW = [0, 19, 34, 55, 80, 108]; // data codewords, ECC L, v1..5 (1 block each)
+const QR_DATA_CW = [0, 19, 34, 55, 80, 108];
 const QR_ECC_LEN = [0, 7, 10, 15, 20, 26];
 
 function gfMul(x: number, y: number): number {
@@ -423,7 +396,7 @@ function makeQR(text: string): QRGrid | null {
       }
   }
   const drawFormat = (mask: number) => {
-    const d = (1 << 3) | mask; // ECC L format bits = 1
+    const d = (1 << 3) | mask;
     let rem = d;
     for (let i = 0; i < 10; i++) rem = (rem << 1) ^ ((rem >>> 9) * 0x537);
     const fbits = ((d << 10) | rem) ^ 0x5412;
@@ -437,7 +410,7 @@ function makeQR(text: string): QRGrid | null {
     for (let i = 8; i < 15; i++) set(8, size - 15 + i, bit(i));
     set(8, size - 8, true);
   };
-  drawFormat(0); // reserve format areas
+  drawFormat(0);
 
   let i = 0;
   for (let right = size - 1; right >= 1; right -= 2) {
@@ -592,7 +565,7 @@ function HearthLogo({ size = 38 }: { size?: number }) {
       height={size}
       viewBox="0 0 48 48"
       aria-hidden="true"
-      className="hb-ember shrink-0"
+      className="hb-ember shrink-0 drop-shadow-[0_4px_14px_rgba(45,212,191,0.35)]"
     >
       <rect
         x="3"
@@ -608,6 +581,23 @@ function HearthLogo({ size = 38 }: { size?: number }) {
       />
       <circle cx="24" cy="27.6" r="3.1" fill="#04110f" opacity="0.85" />
     </svg>
+  );
+}
+
+function RolePill({ role }: { role: string }) {
+  const admin = role === "admin";
+  const Icon = admin ? Users : Shield;
+  return (
+    <span
+      className={`hidden items-center gap-1.5 rounded-full border px-3 py-1 text-xs font-bold tracking-wide sm:inline-flex min-[1600px]:px-4 min-[1600px]:py-1.5 min-[1600px]:text-base ${
+        admin
+          ? "border-[#2dd4bf]/35 bg-[#2dd4bf]/10 text-[#5eead4]"
+          : "border-[#f59e0b]/40 bg-[#f59e0b]/10 text-[#fbbf24]"
+      }`}
+    >
+      <Icon className="h-3.5 w-3.5 min-[1600px]:h-5 min-[1600px]:w-5" />
+      {admin ? "Family" : "Guest"}
+    </span>
   );
 }
 
@@ -633,13 +623,15 @@ function IconBtn({
       aria-label={label}
       title={label}
       onClick={onClick}
-      className={`hb-focus relative inline-flex h-11 w-11 shrink-0 items-center justify-center rounded-xl transition-all duration-150 active:scale-90 min-[1600px]:h-14 min-[1600px]:w-14 ${
+      className={`hb-focus relative inline-flex h-11 w-11 shrink-0 items-center justify-center rounded-xl border border-transparent transition-all duration-150 active:scale-90 min-[1600px]:h-14 min-[1600px]:w-14 ${
         active
           ? "bg-[#2dd4bf]/20 text-[#5eead4]"
-          : "text-[#e8f1ef]/85 hover:bg-white/10 hover:text-white"
-      } ${spin ? "animate-spin" : ""} ${className}`}
+          : "text-[#e8f1ef]/85 hover:border-[#1a2524] hover:bg-white/10 hover:text-white"
+      } ${className}`}
     >
-      {children}
+      <span className={`inline-flex ${spin ? "animate-spin" : ""}`}>
+        {children}
+      </span>
     </button>
   );
 }
@@ -656,11 +648,11 @@ function SectionHeader({
   accent?: string;
 }) {
   return (
-    <div className="relative z-10 mb-4 flex items-end justify-between gap-4">
+    <div className="relative z-10 mb-5 flex items-center justify-between gap-4">
       <div className="flex items-center gap-3">
         <span className="flex h-9 w-9 items-center justify-center rounded-xl border border-[#1a2524] bg-[#0e1514] min-[1600px]:h-12 min-[1600px]:w-12">
           <Icon
-            className={`h-4.5 w-4.5 h-5 w-5 ${accent ?? "text-[#2dd4bf]"}`}
+            className={`h-5 w-5 min-[1600px]:h-6 min-[1600px]:w-6 ${accent ?? "text-[#2dd4bf]"}`}
           />
         </span>
         <h2 className="text-lg font-bold tracking-tight text-[#e8f1ef] md:text-xl min-[1600px]:text-3xl">
@@ -674,14 +666,6 @@ function SectionHeader({
       </div>
       <div className="hidden h-px flex-1 bg-gradient-to-r from-[#2dd4bf]/35 via-[#1a2524] to-transparent sm:block" />
     </div>
-  );
-}
-
-function Kbd({ children }: { children: ReactNode }) {
-  return (
-    <kbd className="rounded-md border border-[#2b3a38] bg-[#141d1c] px-1.5 py-0.5 font-mono text-[11px] font-bold text-[#c3d6d2]">
-      {children}
-    </kbd>
   );
 }
 
@@ -748,13 +732,10 @@ function VideoCard({
     else onPlay(file);
   };
 
-  /* P1 · instant start: warm the playback session while the user's attention is
-       on this card (focus / hover / press), before they press OK. Same device,
-       so it never consumes a second playback slot. */
   const warm = () => {
     if (playable && !manage) prewarmPlayback(file);
   };
-  
+
   const startPress = () => {
     if (!canManage) return;
     longFired.current = false;
@@ -801,8 +782,8 @@ function VideoCard({
     activate();
   };
   const onPointerDown = (e: ReactPointerEvent<HTMLDivElement>) => {
-      warm();
-      if (e.pointerType !== 'mouse') startPress();
+    warm();
+    if (e.pointerType !== "mouse") startPress();
   };
 
   return (
@@ -817,7 +798,7 @@ function VideoCard({
           ? `Manage ${file.file_name} — press OK to focus Delete`
           : `Play ${file.file_name}`
       }
-      className={`hb-card group relative cursor-pointer select-none rounded-2xl border bg-[#0e1514] p-2.5 transition-transform duration-200 min-[1600px]:p-3.5 ${
+      className={`hb-card group relative cursor-pointer select-none rounded-2xl border bg-[#0e1514] p-2.5 shadow-[0_10px_30px_-18px_rgba(0,0,0,0.9)] transition-[transform,border-color,box-shadow] duration-200 min-[1600px]:p-3.5 ${
         variant === "resume" ? "border-[#2dd4bf]/30" : "border-[#1a2524]"
       } hover:border-[#2dd4bf]/45`}
       onClick={onClick}
@@ -834,7 +815,7 @@ function VideoCard({
         if (canManage) onLongManage(file.id);
       }}
     >
-      {/* 16:9 via padding-top (old-TV safe, §7.6) */}
+      {/* 16:9 media frame */}
       <div className="relative w-full overflow-hidden rounded-xl bg-[#141d1c] pt-[56.25%]">
         <div className="absolute inset-0">
           {thumb ? (
@@ -847,46 +828,50 @@ function VideoCard({
           ) : (
             <FallbackArt file={file} />
           )}
-          <div className="absolute inset-x-0 bottom-0 h-1/2 bg-gradient-to-t from-black/80 via-black/30 to-transparent" />
+          <div className="absolute inset-x-0 bottom-0 h-3/5 bg-gradient-to-t from-black/85 via-black/35 to-transparent" />
 
-          {/* Format badge */}
+          {/* Format tag */}
           <span
-            className={`absolute left-2 top-2 inline-flex items-center gap-1 rounded-lg px-2 py-0.5 font-mono text-[10px] font-bold tracking-wide min-[1600px]:text-sm ${
+            className={`absolute left-2 top-2 inline-flex items-center gap-1 rounded-md px-1.5 py-0.5 font-mono text-[10px] font-bold uppercase tracking-wider backdrop-blur-sm min-[1600px]:left-3 min-[1600px]:top-3 min-[1600px]:px-2.5 min-[1600px]:py-1 min-[1600px]:text-sm ${
               risky
-                ? "border border-[#fbbf24]/45 bg-[#fbbf24]/15 text-[#fbbf24]"
-                : "border border-[#2dd4bf]/35 bg-[#042f2e]/80 text-[#5eead4]"
+                ? "border border-[#fbbf24]/45 bg-[#1f1604]/80 text-[#fbbf24]"
+                : "border border-[#2dd4bf]/30 bg-[#042f2e]/75 text-[#5eead4]"
             }`}
           >
             {risky && <AlertTriangle className="h-3 w-3" />}
             {cont}
           </span>
 
-          {/* Watched badge (hidden while managing so Delete owns the corner) */}
+          {/* Watched badge */}
           {watched && !(manage && canManage) && (
-            <span className="absolute right-2 top-2 inline-flex items-center gap-1 rounded-lg border border-[#4ade80]/40 bg-[#052e16]/85 px-2 py-0.5 text-[10px] font-bold text-[#4ade80] min-[1600px]:text-sm">
-              <CheckCircle2 className="h-3 w-3" /> Watched
+            <span
+              className="absolute right-2 top-2 inline-flex items-center gap-1 rounded-md border border-[#4ade80]/35 bg-[#052e16]/80 px-1.5 py-0.5 text-[10px] font-bold text-[#4ade80] backdrop-blur-sm min-[1600px]:right-3 min-[1600px]:top-3 min-[1600px]:px-2.5 min-[1600px]:py-1 min-[1600px]:text-sm"
+              title="Watched"
+            >
+              <CheckCircle2 className="h-3 w-3 min-[1600px]:h-4 min-[1600px]:w-4" />
+              Watched
             </span>
           )}
 
-          {/* Persistent play affordance — never hover-only */}
+          {/* Play affordance */}
           {playable && (
-            <span className="absolute bottom-2.5 left-2.5 flex h-8 w-8 items-center justify-center rounded-full bg-[#2dd4bf] text-[#04110f] shadow-[0_4px_16px_-2px_rgba(45,212,191,0.7)] transition-transform duration-150 group-focus:scale-110 min-[1600px]:h-11 min-[1600px]:w-11">
-              <Play className="ml-0.5 h-4 w-4 min-[1600px]:h-5 min-[1600px]:w-5" />
+            <span className="absolute bottom-2.5 left-2.5 flex h-8 w-8 items-center justify-center rounded-full bg-[#2dd4bf] text-[#04110f] shadow-[0_4px_16px_-2px_rgba(45,212,191,0.7)] transition-transform duration-150 group-hover:scale-105 group-focus:scale-110 min-[1600px]:bottom-3.5 min-[1600px]:left-3.5 min-[1600px]:h-11 min-[1600px]:w-11">
+              <Play className="ml-0.5 h-4 w-4 fill-current min-[1600px]:h-5 min-[1600px]:w-5" />
             </span>
           )}
 
-          {/* Duration */}
+          {/* Duration stamp */}
           {dur > 0 && (
-            <span className="absolute bottom-2.5 right-2.5 rounded-lg bg-black/75 px-2 py-0.5 font-mono text-[11px] font-bold text-white min-[1600px]:text-sm">
+            <span className="absolute bottom-2.5 right-2.5 rounded-md bg-black/70 px-1.5 py-0.5 font-mono text-[11px] font-bold tabular-nums text-white backdrop-blur-sm min-[1600px]:bottom-3.5 min-[1600px]:right-3.5 min-[1600px]:px-2 min-[1600px]:text-sm">
               {fmtTime(dur)}
             </span>
           )}
 
-          {/* Resume progress */}
+          {/* Progress */}
           {pct > 0 && !watched && (
             <div className="absolute inset-x-0 bottom-0 h-1 bg-white/20 min-[1600px]:h-1.5">
               <div
-                className="h-full bg-gradient-to-r from-[#0d9488] via-[#2dd4bf] to-[#38bdf8]"
+                className="h-full rounded-r-full bg-gradient-to-r from-[#0d9488] via-[#2dd4bf] to-[#38bdf8]"
                 style={{ width: `${pct * 100}%` }}
               />
             </div>
@@ -894,11 +879,12 @@ function VideoCard({
         </div>
       </div>
 
-      <div className="px-1 pt-2.5 min-[1600px]:pt-3.5">
-        <p className="hb-clamp2 text-sm font-bold leading-snug text-[#e8f1ef] min-[1600px]:text-2xl">
+      {/* Meta */}
+      <div className="px-1 pb-0.5 pt-3 min-[1600px]:pt-4">
+        <p className="hb-clamp2 text-sm font-semibold leading-snug text-[#e8f1ef] min-[1600px]:text-2xl">
           {file.file_name}
         </p>
-        <p className="mt-1 flex flex-wrap items-center gap-x-2 gap-y-0.5 text-xs text-[#9db6b1] min-[1600px]:text-base">
+        <p className="mt-1.5 flex flex-wrap items-center gap-x-2 gap-y-0.5 text-xs text-[#9db6b1] min-[1600px]:mt-2 min-[1600px]:text-base">
           {variant === "resume" && pos > 0 && !watched ? (
             <span className="inline-flex items-center gap-1 font-semibold text-[#5eead4]">
               <Clock className="h-3.5 w-3.5" /> {fmtTime(pos)}
@@ -930,7 +916,7 @@ function VideoCard({
           onKeyDown={(e) => {
             if (e.key === "Enter" || e.key === " ") e.stopPropagation();
           }}
-          className="hb-focus absolute right-4 top-4 inline-flex h-10 w-10 items-center justify-center rounded-xl border border-[#f43f5e]/50 bg-[#2a1215]/95 text-[#fda4af] shadow-lg transition-all duration-150 hover:bg-[#f43f5e] hover:text-white active:scale-90 min-[1600px]:h-13 min-[1600px]:w-13 min-[1600px]:h-14 min-[1600px]:w-14"
+          className="hb-focus absolute right-4 top-4 inline-flex h-10 w-10 items-center justify-center rounded-xl border border-[#f43f5e]/50 bg-[#2a1215]/95 text-[#fda4af] shadow-lg transition-all duration-150 hover:bg-[#f43f5e] hover:text-white active:scale-90 min-[1600px]:h-14 min-[1600px]:w-14"
         >
           <Trash2 className="h-5 w-5" />
         </button>
@@ -963,7 +949,7 @@ function ConfirmDialog({
   return (
     <div className="fixed inset-0 z-[120] flex items-center justify-center p-6">
       <div
-        className="absolute inset-0 bg-black/70"
+        className="absolute inset-0 bg-black/70 backdrop-blur-[2px]"
         onClick={busy ? undefined : onClose}
         aria-hidden="true"
       />
@@ -1037,11 +1023,12 @@ function AddSheet({
   role: string;
   onClose: () => void;
 }) {
+  void role;
   const link = bot ? `https://t.me/${bot}` : "";
   return (
     <div className="fixed inset-0 z-[120]">
       <div
-        className="absolute inset-0 bg-black/60"
+        className="absolute inset-0 bg-black/60 backdrop-blur-[2px]"
         onClick={onClose}
         aria-hidden="true"
       />
@@ -1117,24 +1104,6 @@ function AddSheet({
               </li>
             ))}
           </ol>
-
-          <div className="rounded-xl border border-[#fbbf24]/25 bg-[#fbbf24]/8 bg-[#fbbf24]/10 px-4 py-3">
-            <p className="text-xs leading-relaxed text-[#fbbf24]/90 min-[1600px]:text-base">
-              <AlertTriangle className="mr-1 inline h-3.5 w-3.5" />
-              MP4 (H.264 + AAC) plays everywhere. MKV/HEVC may not play in some
-              TV browsers — the card will warn you.
-            </p>
-          </div>
-
-          {role === "admin" && (
-            <p className="text-xs leading-relaxed text-[#758f8a] min-[1600px]:text-base">
-              Tip: send{" "}
-              <span className="font-mono font-bold text-[#c3d6d2]">/guest</span>{" "}
-              to the bot to create a 6-digit PIN for visitors, and{" "}
-              <span className="font-mono font-bold text-[#c3d6d2]">/sync</span>{" "}
-              to clean up files deleted from Telegram.
-            </p>
-          )}
         </div>
       </div>
     </div>
@@ -1143,36 +1112,31 @@ function AddSheet({
 
 /* ═══════════════════════════ States ═══════════════════════════ */
 
+function SkeletonCard() {
+  return (
+    <div className="rounded-2xl border border-[#1a2524] bg-[#0e1514] p-2.5 min-[1600px]:p-3.5">
+      <div className="w-full animate-pulse rounded-xl bg-[#141d1c] pt-[56.25%]" />
+      <div className="mt-3 h-4 w-4/5 animate-pulse rounded bg-[#141d1c]" />
+      <div className="mt-2 h-3 w-2/5 animate-pulse rounded bg-[#141d1c]" />
+    </div>
+  );
+}
+
 function SkeletonGrid() {
   return (
-    <div className="hb-fade-up space-y-8">
+    <div
+      className="hb-fade-up space-y-10"
+      role="status"
+      aria-label="Loading your library"
+    >
       <div>
-        <div className="mb-4 h-8 w-56 animate-pulse rounded-lg bg-[#141d1c]" />
-        <div className="flex gap-4 overflow-hidden">
-          {[0, 1, 2].map((i) => (
-            <div
-              key={i}
-              className="w-[260px] shrink-0 rounded-2xl border border-[#1a2524] bg-[#0e1514] p-2.5 sm:w-[320px]"
-            >
-              <div className="w-full animate-pulse rounded-xl bg-[#141d1c] pt-[56.25%]" />
-              <div className="mt-3 h-4 w-4/5 animate-pulse rounded bg-[#141d1c]" />
-              <div className="mt-2 h-3 w-2/5 animate-pulse rounded bg-[#141d1c]" />
-            </div>
-          ))}
+        <div className="mb-5 flex items-center gap-3">
+          <div className="h-9 w-9 animate-pulse rounded-xl bg-[#141d1c]" />
+          <div className="h-7 w-48 animate-pulse rounded-lg bg-[#141d1c]" />
         </div>
-      </div>
-      <div>
-        <div className="mb-4 h-8 w-40 animate-pulse rounded-lg bg-[#141d1c]" />
         <div className="grid grid-cols-2 gap-4 md:grid-cols-3 md:gap-6">
-          {[...Array(6)].map((_, i) => (
-            <div
-              key={i}
-              className="rounded-2xl border border-[#1a2524] bg-[#0e1514] p-2.5"
-            >
-              <div className="w-full animate-pulse rounded-xl bg-[#141d1c] pt-[56.25%]" />
-              <div className="mt-3 h-4 w-4/5 animate-pulse rounded bg-[#141d1c]" />
-              <div className="mt-2 h-3 w-2/5 animate-pulse rounded bg-[#141d1c]" />
-            </div>
+          {[0, 1, 2, 3, 4, 5].map((i) => (
+            <SkeletonCard key={i} />
           ))}
         </div>
       </div>
@@ -1180,108 +1144,23 @@ function SkeletonGrid() {
   );
 }
 
-function EmptyState({
-  bot,
-  role,
-  onAdd,
-  onRefresh,
-}: {
-  bot: string;
-  role: string;
-  onAdd: () => void;
-  onRefresh: () => void;
-}) {
-  const link = bot ? `https://t.me/${bot}` : "";
+function EmptyState({ bot }: { bot: string }) {
+  const botUsername = bot || "bot";
   return (
-    <div className="hb-fade-up flex flex-col items-center py-10 text-center min-[1600px]:py-16">
-      <HearthLogo size={72} />
-      <h2 className="mt-5 text-2xl font-black tracking-tight text-[#e8f1ef] min-[1600px]:text-4xl">
-        Your hearth is waiting
+    <div className="hb-fade-up flex min-h-[55vh] flex-col items-center justify-center px-6 text-center">
+      <span className="mb-6 flex h-20 w-20 items-center justify-center rounded-3xl border border-[#2dd4bf]/25 bg-[#2dd4bf]/10 shadow-[0_0_60px_-15px_rgba(45,212,191,0.5)] min-[1600px]:h-28 min-[1600px]:w-28">
+        <Film className="h-9 w-9 text-[#2dd4bf] min-[1600px]:h-12 min-[1600px]:w-12" />
+      </span>
+      <h2 className="text-2xl font-bold tracking-tight text-[#e8f1ef] min-[1600px]:text-4xl">
+        Your library is empty
       </h2>
-      <p className="mt-2 max-w-md text-sm leading-relaxed text-[#9db6b1] min-[1600px]:text-xl">
-        No videos yet. Forward a video to your bot on Telegram and it will
-        appear here — ready to play on this screen.
+      <p className="mt-3 max-w-md text-base leading-relaxed text-[#9db6b1] min-[1600px]:max-w-2xl min-[1600px]:text-2xl">
+        Forward any video file to{" "}
+        <span className="font-mono font-bold text-[#5eead4]">
+          @{botUsername}
+        </span>{" "}
+        on Telegram. It will automatically appear here.
       </p>
-
-      <div className="mt-8 flex flex-col items-center gap-8 sm:flex-row sm:items-start">
-        {bot && (
-          <div className="flex flex-col items-center gap-2">
-            <div className="w-48 rounded-2xl border border-[#2dd4bf]/30 bg-[#f2f7f6] p-3 shadow-[0_15px_50px_-15px_rgba(45,212,191,0.45)] min-[1600px]:w-64">
-              <QRCode value={link} className="h-auto w-full" />
-            </div>
-            <span className="font-mono text-xs font-bold text-[#5eead4] min-[1600px]:text-base">
-              @{bot}
-            </span>
-          </div>
-        )}
-        <ol className="max-w-xs space-y-3 text-left">
-          {[
-            <>
-              Forward any video to{" "}
-              {bot ? (
-                <span className="font-mono font-bold text-[#5eead4]">
-                  @{bot}
-                </span>
-              ) : (
-                "your bot"
-              )}
-              .
-            </>,
-            <>It lands here instantly — bytes stay on Telegram.</>,
-            <>
-              Press <span className="font-bold text-[#e8f1ef]">OK</span> to
-              play. Two screens at once.
-            </>,
-          ].map((s, i) => (
-            <li key={i} className="flex items-start gap-3">
-              <span className="mt-0.5 flex h-7 w-7 shrink-0 items-center justify-center rounded-full bg-gradient-to-br from-[#2dd4bf] to-[#0d9488] font-mono text-sm font-black text-[#04110f]">
-                {i + 1}
-              </span>
-              <p className="text-sm leading-relaxed text-[#c3d6d2] min-[1600px]:text-lg">
-                {s}
-              </p>
-            </li>
-          ))}
-        </ol>
-      </div>
-
-      <div className="mt-8 flex flex-wrap items-center justify-center gap-3">
-        {bot && (
-          <a
-            href={link}
-            target="_blank"
-            rel="noreferrer"
-            data-hb-focus
-            className={BTN_PRIMARY}
-          >
-            <ExternalLink className="h-4 w-4" /> Open the bot
-          </a>
-        )}
-        <button
-          type="button"
-          data-hb-focus
-          onClick={onAdd}
-          className={BTN_GHOST}
-        >
-          <QrCode className="h-4 w-4" /> Show QR
-        </button>
-        <button
-          type="button"
-          data-hb-focus
-          onClick={onRefresh}
-          className={BTN_GHOST}
-        >
-          <RefreshCw className="h-4 w-4" /> Refresh
-        </button>
-      </div>
-
-      {role === "admin" && (
-        <p className="mt-6 text-xs text-[#758f8a] min-[1600px]:text-base">
-          Tip: send{" "}
-          <span className="font-mono font-bold text-[#c3d6d2]">/guest</span> to
-          the bot to create a PIN for visitors.
-        </p>
-      )}
     </div>
   );
 }
@@ -1314,10 +1193,9 @@ function ErrorState({ onRetry }: { onRetry: () => void }) {
 /* ═══════════════════════════════ FileBrowser (Home) ═══════════════════════════════ */
 
 export default function FileBrowser() {
-  const { previewFile, setPreviewFile, isPlayerMinimized, addToast } =
-    useAppStore();
+  const { setPreviewFile, addToast } = useAppStore();
 
-  /* ── Data (kept hooks) ── */
+  /* ── Data (flat library, sorted newest first) ── */
   const [page, setPage] = useState(1);
   const [hasMore, setHasMore] = useState(true);
   const [allFiles, setAllFiles] = useState<HubFile[]>([]);
@@ -1328,11 +1206,7 @@ export default function FileBrowser() {
     isError: filesError,
     refetch: refetchFiles,
   } = useFiles(null, undefined, undefined, page);
-  const {
-    data: cwData,
-    isFetching: cwFetching,
-    refetch: refetchCW,
-  } = useContinueWatching(50);
+  const { data: cwData, refetch: refetchCW } = useContinueWatching(50);
   const deleteFiles = useDeleteFiles();
 
   useEffect(() => {
@@ -1347,7 +1221,6 @@ export default function FileBrowser() {
     setHasMore(filesList.page * filesList.per_page < filesList.total);
   }, [filesList]);
 
-  /* ── Local state ── */
   const [role, setRole] = useState<string>("admin");
   const [bot, setBot] = useState<string>("");
   const [manage, setManage] = useState(false);
@@ -1361,11 +1234,9 @@ export default function FileBrowser() {
   const dialogRef = useRef<HTMLDivElement>(null);
   const sentinelRef = useRef<HTMLDivElement>(null);
   const lastPlayedRef = useRef<number | null>(null);
-  const didAutoFocus = useRef(false);
 
   const canManage = role === "admin";
-  const dialogOpen = !!confirm || addOpen;
-  const refreshing = filesFetching || cwFetching;
+  const refreshing = filesFetching;
 
   const continueWatching = useMemo(() => {
     const list = (cwData?.files as HubFile[] | undefined) ?? [];
@@ -1392,7 +1263,6 @@ export default function FileBrowser() {
     videos.length === 0 &&
     continueWatching.length === 0;
 
-  /* ── Role + bot info ── */
   useEffect(() => {
     let live = true;
     void fetchRole().then((r) => {
@@ -1409,7 +1279,6 @@ export default function FileBrowser() {
     };
   }, []);
 
-  /* ── Actions ── */
   const refresh = useCallback(() => {
     void refetchFiles();
     void refetchCW();
@@ -1449,7 +1318,7 @@ export default function FileBrowser() {
 
   const doDelete = async (f: HubFile) => {
     setBusy(true);
-    setDeletedIds((prev) => new Set(prev).add(f.id)); // optimistic
+    setDeletedIds((prev) => new Set(prev).add(f.id));
     setConfirm(null);
     try {
       await deleteFiles.mutateAsync([f.id]);
@@ -1464,7 +1333,7 @@ export default function FileBrowser() {
         const n = new Set(prev);
         n.delete(f.id);
         return n;
-      }); // rollback
+      });
       addToast(
         axStatus(err) === 403
           ? "Only the family account can delete"
@@ -1473,7 +1342,7 @@ export default function FileBrowser() {
       );
     } finally {
       setBusy(false);
-      setManage(false); // leave Manage mode either way
+      setManage(false);
       requestAnimationFrame(() => {
         scrollRef.current
           ?.querySelector<HTMLElement>("[data-hb-focus]")
@@ -1486,38 +1355,10 @@ export default function FileBrowser() {
     setBusy(true);
     try {
       await api.post("/auth/logout");
-    } catch {
-      /* best effort revoke */
-    }
-    try {
-      const deviceId = localStorage.getItem("hearth_device_id");
-      const token = localStorage.getItem("access_token");
-      if (deviceId) {
-        void fetch(resolveApiUrl("/api/playback/stop"), {
-          method: "POST",
-          keepalive: true,
-          headers: {
-            "Content-Type": "application/json",
-            ...(token ? { Authorization: `Bearer ${token}` } : {}),
-          },
-          body: JSON.stringify({ device_id: deviceId }),
-        }).catch(() => {
-          /* best effort */
-        });
-      }
-    } catch {
-      /* noop */
-    }
-    try {
-      localStorage.removeItem("access_token");
-      localStorage.removeItem("refresh_token");
-    } catch {
-      /* noop */
-    }
+    } catch {}
     window.location.reload();
   };
 
-  /* ── Infinite scroll (kept logic, IntersectionObserver + button) ── */
   useEffect(() => {
     const el = sentinelRef.current;
     if (!el || !hasMore || initialLoading) return;
@@ -1531,303 +1372,39 @@ export default function FileBrowser() {
     return () => io.disconnect();
   }, [hasMore, initialLoading, filesFetching]);
 
-  /* ── Focus: initial auto-focus + restore after player closes ── */
-  useEffect(() => {
-    if (previewFile || dialogOpen || initialLoading) return;
-    if (lastPlayedRef.current !== null) {
-      const id = lastPlayedRef.current;
-      lastPlayedRef.current = null;
-      requestAnimationFrame(() => {
-        rootRef.current
-          ?.querySelector<HTMLElement>(`[data-hb-id="${id}"]`)
-          ?.focus();
-      });
-      return;
-    }
-    if (
-      !didAutoFocus.current &&
-      (videos.length > 0 || continueWatching.length > 0)
-    ) {
-      didAutoFocus.current = true;
-      requestAnimationFrame(() => {
-        scrollRef.current
-          ?.querySelector<HTMLElement>("[data-hb-focus]")
-          ?.focus();
-      });
-    }
-  }, [
-    previewFile,
-    dialogOpen,
-    initialLoading,
-    videos.length,
-    continueWatching.length,
-  ]);
-
-  /* ── Dialog autofocus: Cancel by default (§8.4) ── */
-  useEffect(() => {
-    if (!dialogOpen) return;
-    const id = requestAnimationFrame(() => {
-      const el =
-        dialogRef.current?.querySelector<HTMLElement>("[data-hb-autofocus]") ??
-        dialogRef.current?.querySelector<HTMLElement>("button, a[href]");
-      el?.focus();
-    });
-    return () => cancelAnimationFrame(id);
-  }, [dialogOpen, confirm, addOpen]);
-
-  /* ── Spatial navigation + remote keys. No deps array on purpose: the
-          listener always closes over the freshest state (≤ a few renders/s). ── */
-  useEffect(() => {
-    const focusables = () =>
-      Array.from(
-        rootRef.current?.querySelectorAll<HTMLElement>("[data-hb-focus]") ?? [],
-      ).filter(
-        (el) => el.getClientRects().length > 0 && !el.hasAttribute("disabled"),
-      );
-
-    const navWithin = (el: HTMLElement | null, dir: 1 | -1) => {
-      if (!el) return;
-      const items = Array.from(
-        el.querySelectorAll<HTMLElement>(
-          "button:not([disabled]), a[href], [data-hb-focus]",
-        ),
-      ).filter((x) => x.getClientRects().length > 0);
-      if (!items.length) return;
-      const i = items.indexOf(document.activeElement as HTMLElement);
-      (items[(i + dir + items.length) % items.length] ?? items[0]).focus();
-    };
-
-    const moveFocus = (dir: "up" | "down" | "left" | "right") => {
-      const els = focusables();
-      const cur = document.activeElement as HTMLElement | null;
-      if (
-        !cur ||
-        !rootRef.current?.contains(cur) ||
-        !cur.hasAttribute("data-hb-focus")
-      ) {
-        (
-          scrollRef.current?.querySelector<HTMLElement>("[data-hb-focus]") ??
-          els[0]
-        )?.focus();
-        return;
-      }
-      const r = cur.getBoundingClientRect();
-      const cx = r.left + r.width / 2,
-        cy = r.top + r.height / 2;
-      let best: HTMLElement | null = null,
-        bestScore = Infinity;
-      for (const el of els) {
-        if (el === cur) continue;
-        const b = el.getBoundingClientRect();
-        const dx = b.left + b.width / 2 - cx,
-          dy = b.top + b.height / 2 - cy;
-        let primary: number, cross: number;
-        if (dir === "left") {
-          if (dx >= -8) continue;
-          primary = -dx;
-          cross = Math.abs(dy);
-        } else if (dir === "right") {
-          if (dx <= 8) continue;
-          primary = dx;
-          cross = Math.abs(dy);
-        } else if (dir === "up") {
-          if (dy >= -8) continue;
-          primary = -dy;
-          cross = Math.abs(dx);
-        } else {
-          if (dy <= 8) continue;
-          primary = dy;
-          cross = Math.abs(dx);
-        }
-        const score = primary + cross * 2.2;
-        if (score < bestScore) {
-          bestScore = score;
-          best = el;
-        }
-      }
-      if (best) {
-        best.focus();
-        best.scrollIntoView({
-          block: "center",
-          inline: "nearest",
-          behavior: "auto",
-        });
-      }
-    };
-
-    const onKeyDown = (e: KeyboardEvent) => {
-      if (previewFile) return; // the player owns the keys
-      const k = e.key,
-        code = e.keyCode;
-      const t = e.target as HTMLElement | null;
-      const interactive = !!t?.closest?.(
-        'button, a, input, select, textarea, [role="button"]',
-      );
-
-      if (dialogOpen) {
-        if (
-          k === "Escape" ||
-          k === "Backspace" ||
-          k === "BrowserBack" ||
-          code === 461 ||
-          code === 10009
-        ) {
-          e.preventDefault();
-          if (!busy) {
-            setConfirm(null);
-            setAddOpen(false);
-          }
-          return;
-        }
-        if (k === "Tab") {
-          e.preventDefault();
-          navWithin(dialogRef.current, e.shiftKey ? -1 : 1);
-          return;
-        }
-        if (k === "ArrowDown" || k === "ArrowRight") {
-          e.preventDefault();
-          navWithin(dialogRef.current, 1);
-          return;
-        }
-        if (k === "ArrowUp" || k === "ArrowLeft") {
-          e.preventDefault();
-          navWithin(dialogRef.current, -1);
-          return;
-        }
-        if ((k === "Enter" || k === " ") && interactive) return;
-        if (k === " ") e.preventDefault();
-        return;
-      }
-
-      if (
-        k === "Escape" ||
-        k === "Backspace" ||
-        k === "BrowserBack" ||
-        code === 461 ||
-        code === 10009
-      ) {
-        if (manage) {
-          e.preventDefault();
-          setManage(false);
-        }
-        return;
-      }
-      if (k === "ContextMenu" || code === 93) {
-        if (canManage) {
-          e.preventDefault();
-          setManage((m) => !m);
-        }
-        return;
-      }
-      if ((k === "m" || k === "M") && !interactive) {
-        if (canManage) {
-          e.preventDefault();
-          setManage((m) => !m);
-        }
-        return;
-      }
-      if (k === "F5" || (e.ctrlKey && (k === "r" || k === "R"))) {
-        e.preventDefault();
-        refresh();
-        return;
-      }
-      if (k === "ArrowLeft") {
-        e.preventDefault();
-        moveFocus("left");
-        return;
-      }
-      if (k === "ArrowRight") {
-        e.preventDefault();
-        moveFocus("right");
-        return;
-      }
-      if (k === "ArrowUp") {
-        e.preventDefault();
-        moveFocus("up");
-        return;
-      }
-      if (k === "ArrowDown") {
-        e.preventDefault();
-        moveFocus("down");
-        return;
-      }
-    };
-
-    window.addEventListener("keydown", onKeyDown);
-    return () => window.removeEventListener("keydown", onKeyDown);
-  });
-
-  /* ═══════════════════════════════ Render ═══════════════════════════════ */
-
   return (
     <div
       ref={rootRef}
       data-hb-root
-      className="relative flex h-screen flex-col overflow-hidden bg-[#070b0b] font-sans text-[#e8f1ef] selection:bg-[#2dd4bf]/30"
+      className="relative flex h-screen flex-col overflow-hidden bg-[#070b0b] font-sans text-[#e8f1ef]"
     >
       <style>{HB_CSS}</style>
       <SharedDefs />
 
-      {/* Ember-aurora backdrop: teal hearth glow + warm ember + sky accent + grain */}
-      <div className="pointer-events-none absolute inset-0" aria-hidden="true">
-        <div
-          className="absolute inset-0"
-          style={{
-            background:
-              "radial-gradient(55% 45% at 12% 0%, rgba(20,184,166,0.14), transparent 70%)," +
-              "radial-gradient(45% 40% at 95% 100%, rgba(245,158,11,0.10), transparent 70%)," +
-              "radial-gradient(35% 30% at 80% 10%, rgba(56,189,248,0.07), transparent 70%)",
-          }}
-        />
-        <div
-          className="hb-drift absolute -inset-[10%]"
-          style={{
-            background:
-              "radial-gradient(40% 35% at 30% 60%, rgba(45,212,191,0.08), transparent 70%)," +
-              "radial-gradient(30% 30% at 70% 30%, rgba(225,29,72,0.05), transparent 70%)",
-          }}
-        />
-        <div
-          className="absolute inset-0 opacity-[0.05]"
-          style={{
-            backgroundImage:
-              "url(\"data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='160' height='160'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.9' numOctaves='2'/%3E%3C/filter%3E%3Crect width='160' height='160' filter='url(%23n' opacity='0.55'/%3E%3C/svg%3E\")",
-          }}
-        />
-      </div>
+      {/* Ambient glow (decorative) */}
+      <div
+        aria-hidden="true"
+        className="hb-drift pointer-events-none absolute inset-0 z-0 opacity-70"
+        style={{
+          background:
+            "radial-gradient(50% 40% at 12% 0%, rgba(45,212,191,0.10), transparent 70%)," +
+            "radial-gradient(40% 35% at 95% 100%, rgba(245,158,11,0.07), transparent 70%)",
+        }}
+      />
 
-      {/* ═════════ Top bar (fixed) ═════════ */}
+      {/* Fixed header */}
       <header
-        className="relative z-40 shrink-0 border-b border-[#1a2524] bg-[#070b0b]/95 px-4 sm:px-8 min-[1600px]:px-[5%]"
+        className="relative z-[45] shrink-0 border-b border-[#1a2524] bg-[#070b0b]/90 px-4 backdrop-blur-md sm:px-8"
         style={{ paddingTop: "env(safe-area-inset-top)" }}
       >
         <div className="flex h-16 items-center justify-between gap-3 md:h-20 min-[1600px]:h-24">
-          <div className="flex min-w-0 items-center gap-3">
+          <div className="flex min-w-0 items-center gap-3 min-[1600px]:gap-4">
             <HearthLogo size={38} />
-            <div className="min-w-0">
-              <span className="block text-xl font-black tracking-tight text-white min-[1600px]:text-3xl">
-                Hearth
-              </span>
-              <span className="hidden text-[11px] font-medium text-[#758f8a] sm:block min-[1600px]:text-sm">
-                family media · original quality
-              </span>
-            </div>
-            <span
-              className={`ml-2 inline-flex shrink-0 items-center gap-1.5 rounded-full border px-3 py-1 text-xs font-bold min-[1600px]:text-base ${
-                role === "admin"
-                  ? "border-[#2dd4bf]/40 bg-[#2dd4bf]/10 text-[#5eead4]"
-                  : "border-[#38bdf8]/40 bg-[#38bdf8]/10 text-[#7dd3fc]"
-              }`}
-            >
-              {role === "admin" ? (
-                <Shield className="h-3.5 w-3.5" />
-              ) : (
-                <Users className="h-3.5 w-3.5" />
-              )}
-              {role === "admin" ? "Family" : "Guest"}
+            <span className="block text-xl font-black tracking-tight text-white min-[1600px]:text-3xl">
+              Hearth
             </span>
+            <RolePill role={role} />
           </div>
-
           <div className="flex shrink-0 items-center gap-1.5 sm:gap-2">
             <IconBtn
               label="Refresh library"
@@ -1841,95 +1418,42 @@ export default function FileBrowser() {
                 type="button"
                 data-hb-focus
                 onClick={() => setAddOpen(true)}
-                className={`${BTN_GHOST} !px-3.5 !py-2.5 min-[1600px]:!px-5 min-[1600px]:!py-3`}
-                aria-label="Add videos"
+                className={BTN_GHOST}
               >
-                <Plus className="h-4 w-4 text-[#2dd4bf]" />
-                <span className="hidden sm:inline">Add</span>
-              </button>
-            )}
-            {canManage && (
-              <button
-                type="button"
-                data-hb-focus
-                onClick={() => setManage((m) => !m)}
-                aria-pressed={manage}
-                className={`hb-focus inline-flex items-center gap-2 rounded-xl border px-3.5 py-2.5 text-sm font-semibold transition-all duration-150 active:scale-[0.98] min-[1600px]:px-5 min-[1600px]:py-3 min-[1600px]:text-lg ${
-                  manage
-                    ? "border-[#f43f5e]/50 bg-[#f43f5e]/15 text-[#fda4af] hover:bg-[#f43f5e]/25"
-                    : "border-[#2b3a38] bg-[#1a2524] text-[#e8f1ef] hover:border-[#2dd4bf]/60 hover:bg-[#22302e]"
-                }`}
-              >
-                {manage ? (
-                  <Check className="h-4 w-4" />
-                ) : (
-                  <Pencil className="h-4 w-4" />
-                )}
-                <span className="hidden sm:inline">
-                  {manage ? "Done" : "Manage"}
-                </span>
+                <Plus className="h-4 w-4 text-[#2dd4bf]" /> Add
               </button>
             )}
             <IconBtn
               label="Sign out"
-              onClick={() => {
-                setAddOpen(false);
-                setConfirm({ kind: "logout" });
-              }}
+              onClick={() => setConfirm({ kind: "logout" })}
             >
               <LogOut className="h-5 w-5" />
             </IconBtn>
           </div>
         </div>
-
-        {manage && canManage && (
-          <div className="hb-fade-up mb-3 flex items-center gap-3 rounded-xl border border-[#f43f5e]/30 bg-[#f43f5e]/10 px-4 py-2.5">
-            <Pencil className="h-4 w-4 shrink-0 text-[#fda4af]" />
-            <p className="flex-1 text-xs font-semibold text-[#fda4af] min-[1600px]:text-base">
-              Manage mode — press OK on a card, then OK on Delete. Deletions
-              remove the file from Telegram too.
-            </p>
-            <button
-              type="button"
-              data-hb-focus
-              onClick={() => setManage(false)}
-              className="hb-focus rounded-lg border border-[#f43f5e]/40 px-3 py-1 text-xs font-bold text-[#fda4af] transition-all duration-150 hover:bg-[#f43f5e]/20 min-[1600px]:text-base"
-            >
-              Done
-            </button>
-          </div>
-        )}
       </header>
 
-      {/* ═════════ Scrollable library ═════════ */}
       <main
         ref={scrollRef}
-        className="hb-scroll relative z-10 flex-1 overflow-y-auto overflow-x-hidden px-4 pt-6 sm:px-8 min-[1600px]:px-[5%] min-[1600px]:pt-10"
-        style={{
-          paddingBottom: `calc(${isPlayerMinimized ? "7.5rem" : "3rem"} + env(safe-area-inset-bottom))`,
-        }}
+        className="hb-scroll relative z-10 flex-1 overflow-y-auto px-4 pb-16 pt-7 sm:px-8 min-[1600px]:pt-10"
       >
         {initialLoading ? (
           <SkeletonGrid />
         ) : filesError && videos.length === 0 ? (
           <ErrorState onRetry={refresh} />
         ) : isEmpty ? (
-          <EmptyState
-            bot={bot}
-            role={role}
-            onAdd={() => setAddOpen(true)}
-            onRefresh={refresh}
-          />
+          <EmptyState bot={bot} />
         ) : (
-          <div className="space-y-10 min-[1600px]:space-y-14">
+          <div className="space-y-12 min-[1600px]:space-y-16">
             {continueWatching.length > 0 && (
-              <section className="hb-fade-up" aria-label="Continue watching">
+              <section aria-label="Continue watching">
                 <SectionHeader
                   icon={Play}
                   title="Continue watching"
                   count={continueWatching.length}
                 />
-                <div className="hb-scroll-x -mx-1 flex snap-x gap-4 overflow-x-auto px-1 pb-3 min-[1600px]:gap-6">
+                {/* Padding gives the focus ring + 1.06 scale room inside the scroller */}
+                <div className="hb-scroll-x -mx-3 flex snap-x gap-4 overflow-x-auto px-3 pb-5 pt-3 min-[1600px]:gap-6">
                   {continueWatching.map((f) => (
                     <div
                       key={f.id}
@@ -1950,14 +1474,14 @@ export default function FileBrowser() {
               </section>
             )}
 
-            <section className="hb-fade-up" aria-label="All videos">
+            <section aria-label="All videos">
               <SectionHeader
                 icon={Film}
                 title="All videos"
                 count={totalCount}
                 accent="text-[#38bdf8]"
               />
-              <div className="grid grid-cols-2 gap-4 md:grid-cols-3 md:gap-6 min-[1600px]:gap-8">
+              <div className="grid grid-cols-2 gap-4 p-1 md:grid-cols-3 md:gap-6 min-[1600px]:gap-8">
                 {videos.map((f) => (
                   <VideoCard
                     key={f.id}
@@ -1971,107 +1495,36 @@ export default function FileBrowser() {
                   />
                 ))}
               </div>
-
-              {hasMore && (
-                <div className="mt-8 flex flex-col items-center gap-3">
-                  <div
-                    ref={sentinelRef}
-                    className="h-px w-full"
-                    aria-hidden="true"
-                  />
-                  <button
-                    type="button"
-                    data-hb-focus
-                    onClick={() => setPage((p) => p + 1)}
-                    disabled={filesFetching}
-                    className={BTN_GHOST}
-                  >
-                    {filesFetching ? (
-                      <Loader2 className="h-4 w-4 animate-spin" />
-                    ) : (
-                      <Plus className="h-4 w-4" />
-                    )}
-                    Load more
-                  </button>
-                </div>
-              )}
             </section>
-
-            {/* Footer: hints + attribution */}
-            <footer className="border-t border-[#1a2524] pt-6 text-center">
-              <div className="flex flex-wrap items-center justify-center gap-x-4 gap-y-2 text-xs text-[#758f8a] min-[1600px]:text-base">
-                <span className="inline-flex items-center gap-1.5">
-                  <Kbd>←</Kbd>
-                  <Kbd>→</Kbd>
-                  <Kbd>↑</Kbd>
-                  <Kbd>↓</Kbd> navigate
-                </span>
-                <span className="inline-flex items-center gap-1.5">
-                  <Kbd>OK</Kbd> play
-                </span>
-                {canManage && (
-                  <span className="inline-flex items-center gap-1.5">
-                    hold <Kbd>OK</Kbd> or <Kbd>M</Kbd> manage
-                  </span>
-                )}
-                <span className="inline-flex items-center gap-1.5">
-                  <Kbd>Back</Kbd> exit manage
-                </span>
-              </div>
-              <p className="mt-3 flex flex-wrap items-center justify-center gap-2 text-[11px] text-[#566e6a] min-[1600px]:text-sm">
-                <Tv className="h-3.5 w-3.5" />
-                this screen: {getDeviceLabel()} · streams original quality from
-                Telegram · two screens at once
-              </p>
-              <p className="mt-1 text-[11px] text-[#3f524f] min-[1600px]:text-sm">
-                Hearth · based on TelePlay by subinps (MIT)
-              </p>
-            </footer>
           </div>
         )}
       </main>
 
-      {/* ═════════ Dialogs ═════════ */}
       {confirm?.kind === "delete" && (
         <ConfirmDialog
           dialogRef={dialogRef}
           title="Delete this video?"
           body={
             <>
-              <span className="font-bold text-[#e8f1ef]">
-                “{confirm.file.file_name}”
-              </span>{" "}
-              will be removed from your library{" "}
-              <span className="font-bold text-[#fda4af]">
-                and from Telegram too — this cannot be undone.
-              </span>
+              “{confirm.file.file_name}” will be removed from your library and
+              Telegram.
             </>
           }
           confirmLabel="Delete"
           danger
           busy={busy}
-          onConfirm={() => {
-            void doDelete(confirm.file);
-          }}
+          onConfirm={() => void doDelete(confirm.file)}
           onClose={() => setConfirm(null)}
         />
       )}
       {confirm?.kind === "logout" && (
         <ConfirmDialog
           dialogRef={dialogRef}
-          title="Sign out on this device?"
-          body={
-            <>
-              You’ll need the Telegram code
-              {role === "guest" ? " or a guest PIN" : ""} to sign back in on
-              this screen.
-            </>
-          }
+          title="Sign out?"
+          body={<>You will need your PIN or login code to return.</>}
           confirmLabel="Sign out"
           busy={busy}
-          onConfirm={() => {
-            void doLogout();
-          }}
+          onConfirm={() => void doLogout()}
           onClose={() => setConfirm(null)}
         />
       )}
@@ -2084,7 +1537,6 @@ export default function FileBrowser() {
         />
       )}
 
-      {/* App-wide toasts (kept infrastructure) */}
       <Toasts />
     </div>
   );

@@ -15,6 +15,10 @@
  *  · no resume story                           → progress bar, "Resume 23:14 · 42 min left", Watched
  *  · no remote affordances                     → long-press OK / Menu key → Manage, Delete key, TV Back safe
  *
+ * UI polish pass: crisper solid chips, clearer type hierarchy, richer progress
+ * track, and a distinct rose focus state on the Manage-mode Delete button.
+ * Behaviour, props and data attributes are unchanged.
+ *
  * Legacy props (viewMode / selected / onSelect) are accepted and intentionally ignored so
  * older callers keep compiling — the flat library has no list view and no multi-select (§4.3).
  * Emits the data attributes Home navigates with: data-hb-focus / data-hb-id / data-hb-delete.
@@ -85,14 +89,16 @@ const RISKY_EXTS = ["MKV", "AVI", "WMV", "FLV", "TS"];
 
 const CARD_CSS = `
 [data-hearth-card]{-webkit-tap-highlight-color:transparent;}
-.hc-card{transition:transform .18s ease,box-shadow .18s ease,border-color .18s ease;}
-.hc-card:hover{border-color:rgba(45,212,191,.45);}
-.hc-card:focus{outline:none;transform:scale(1.06);z-index:6;border-color:rgba(45,212,191,.65);
-  box-shadow:0 0 0 4px #5eead4,0 18px 40px -12px rgba(20,184,166,.45);}
+.hc-card{transition:transform .18s ease,box-shadow .18s ease,border-color .18s ease;will-change:transform;}
+.hc-card:hover{border-color:rgba(45,212,191,.5);}
+.hc-card:focus{outline:none;transform:scale(1.06);z-index:6;border-color:rgba(94,234,212,.9);
+  box-shadow:0 0 0 4px #5eead4,0 22px 48px -14px rgba(20,184,166,.5);}
 .hc-focus:focus{outline:4px solid #5eead4;outline-offset:3px;border-radius:14px;}
+.hc-del:focus{outline:4px solid #fff;outline-offset:2px;border-radius:14px;background:#f43f5e;color:#fff;
+  transform:scale(1.12);box-shadow:0 0 0 8px rgba(244,63,94,.35),0 10px 30px -6px rgba(244,63,94,.7);}
 .hc-clamp2{display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden;}
 @keyframes hcIn{from{opacity:0;transform:translateY(8px)}to{opacity:1;transform:none}}
-@keyframes hcPop{from{opacity:0;transform:scale(.85)}to{opacity:1;transform:none}}
+@keyframes hcPop{from{opacity:0;transform:scale(.8)}to{opacity:1;transform:none}}
 @keyframes hcShimmer{0%{opacity:.45}50%{opacity:.8}100%{opacity:.45}}
 .hc-in{animation:hcIn .18s ease-out backwards}
 .hc-pop{animation:hcPop .16s ease-out backwards}
@@ -323,14 +329,14 @@ function FileCardBase({
       ?.focus();
   };
   const activate = () => {
-      if (showDelete) focusDelete();
-      else onPlay(file);
+    if (showDelete) focusDelete();
+    else onPlay(file);
   };
 
   /* P1 · instant start: warm the playback session while this card has the user's
      attention, before they press OK. Same device → no extra playback slot used. */
   const warm = () => {
-      if (playable && !showDelete) prewarmPlayback(file);
+    if (playable && !showDelete) prewarmPlayback(file);
   };
   const startPress = () => {
     if (!canManage || !onLongManage) return;
@@ -388,8 +394,8 @@ function FileCardBase({
     activate();
   };
   const onPointerDown = (e: ReactPointerEvent<HTMLDivElement>) => {
-      warm();
-      if (e.pointerType !== 'mouse') startPress();
+    warm();
+    if (e.pointerType !== "mouse") startPress();
   };
 
   const ariaLabel = showDelete
@@ -397,6 +403,8 @@ function FileCardBase({
     : playable
       ? `${watched ? "Watched" : pos > 0 ? `Resume ${fmtTime(pos)} of ${fmtTime(dur)}` : "Play"} ${file.file_name}`
       : `${file.file_name} — not playable in the browser`;
+
+  const resuming = variant === "resume" && pos > 0 && !watched;
 
   return (
     <div
@@ -408,7 +416,7 @@ function FileCardBase({
       role="button"
       tabIndex={0}
       aria-label={ariaLabel}
-      className={`tv-card hc-card hc-in group relative cursor-pointer select-none rounded-2xl border bg-[#0e1514] p-2.5 min-[1600px]:p-3.5 ${
+      className={`tv-card hc-card hc-in group relative cursor-pointer select-none rounded-2xl border bg-[#0e1514] p-2.5 shadow-[0_10px_30px_-18px_rgba(0,0,0,0.9)] min-[1600px]:p-3.5 ${
         variant === "resume" ? "border-[#2dd4bf]/30" : "border-[#1a2524]"
       }`}
       style={{ animationDelay: `${Math.min(index, 8) * 35}ms` }}
@@ -420,7 +428,10 @@ function FileCardBase({
       onPointerLeave={endPress}
       onPointerCancel={endPress}
       onMouseEnter={warm}
-      onFocus={(e) => { if (e.currentTarget === e.target) ensureVisible(e.currentTarget); warm(); }}
+      onFocus={(e) => {
+        if (e.currentTarget === e.target) ensureVisible(e.currentTarget);
+        warm();
+      }}
       onContextMenu={(e) => {
         e.preventDefault();
         if (canManage && onLongManage) onLongManage(file.id);
@@ -440,43 +451,50 @@ function FileCardBase({
           ) : (
             <FallbackArt file={file} />
           )}
-          <div className="absolute inset-x-0 bottom-0 h-1/2 bg-gradient-to-t from-black/80 via-black/30 to-transparent" />
+          {/* Legibility scrim for bottom overlays */}
+          <div className="absolute inset-x-0 bottom-0 h-3/5 bg-gradient-to-t from-black/85 via-black/35 to-transparent" />
 
-          {/* Container / compatibility badge */}
+          {/* Container / compatibility chip — solid ink, no backdrop-filter (TV safe) */}
           <span
-            className={`absolute left-2 top-2 inline-flex items-center gap-1 rounded-lg px-2 py-0.5 font-mono text-[10px] font-bold tracking-wide min-[1600px]:text-sm ${
+            className={`absolute left-2 top-2 inline-flex items-center gap-1 rounded-md px-1.5 py-0.5 font-mono text-[10px] font-bold uppercase leading-none tracking-wider min-[1600px]:left-3 min-[1600px]:top-3 min-[1600px]:gap-1.5 min-[1600px]:px-2.5 min-[1600px]:py-1.5 min-[1600px]:text-sm ${
               risky
-                ? "border border-[#fbbf24]/45 bg-[#3a2a06]/90 text-[#fbbf24]"
-                : "border border-[#2dd4bf]/35 bg-[#042f2e]/85 text-[#5eead4]"
+                ? "border border-[#fbbf24]/55 bg-[#2b1f05] text-[#fbbf24]"
+                : "border border-[#2dd4bf]/35 bg-[#042f2e] text-[#5eead4]"
             }`}
           >
-            {risky && <AlertTriangle className="h-3 w-3" />}
+            {risky && (
+              <AlertTriangle className="h-3 w-3 min-[1600px]:h-4 min-[1600px]:w-4" />
+            )}
             {cont}
           </span>
 
+          {/* Watched */}
           {watched && !showDelete && (
-            <span className="absolute right-2 top-2 inline-flex items-center gap-1 rounded-lg border border-[#4ade80]/40 bg-[#052e16]/90 px-2 py-0.5 text-[10px] font-bold text-[#4ade80] min-[1600px]:text-sm">
-              <CheckCircle2 className="h-3 w-3" /> Watched
+            <span className="absolute right-2 top-2 inline-flex items-center gap-1 rounded-md border border-[#4ade80]/40 bg-[#052e16] px-1.5 py-0.5 text-[10px] font-bold leading-none text-[#4ade80] min-[1600px]:right-3 min-[1600px]:top-3 min-[1600px]:gap-1.5 min-[1600px]:px-2.5 min-[1600px]:py-1.5 min-[1600px]:text-sm">
+              <CheckCircle2 className="h-3 w-3 min-[1600px]:h-4 min-[1600px]:w-4" />
+              Watched
             </span>
           )}
 
           {/* Permanent play affordance — never hover-only */}
           {playable && (
-            <span className="absolute bottom-2.5 left-2.5 flex h-8 w-8 items-center justify-center rounded-full bg-[#2dd4bf] text-[#04110f] shadow-[0_4px_16px_-2px_rgba(45,212,191,0.7)] transition-transform duration-150 group-focus:scale-110 min-[1600px]:h-11 min-[1600px]:w-11">
-              <Play className="ml-0.5 h-4 w-4 min-[1600px]:h-5 min-[1600px]:w-5" />
+            <span className="absolute bottom-3 left-2.5 flex h-8 w-8 items-center justify-center rounded-full bg-[#2dd4bf] text-[#04110f] shadow-[0_4px_16px_-2px_rgba(45,212,191,0.7)] ring-2 ring-[#04110f]/40 transition-transform duration-150 group-hover:scale-105 group-focus:scale-110 min-[1600px]:bottom-4 min-[1600px]:left-3.5 min-[1600px]:h-11 min-[1600px]:w-11">
+              <Play className="ml-0.5 h-4 w-4 fill-current min-[1600px]:h-5 min-[1600px]:w-5" />
             </span>
           )}
 
+          {/* Duration stamp */}
           {dur > 0 && (
-            <span className="absolute bottom-2.5 right-2.5 rounded-lg bg-black/80 px-2 py-0.5 font-mono text-[11px] font-bold text-white min-[1600px]:text-sm">
+            <span className="absolute bottom-3 right-2.5 rounded-md bg-[#04110f]/90 px-1.5 py-0.5 font-mono text-[11px] font-bold leading-none tabular-nums text-white min-[1600px]:bottom-4 min-[1600px]:right-3.5 min-[1600px]:px-2 min-[1600px]:py-1.5 min-[1600px]:text-sm">
               {fmtTime(dur)}
             </span>
           )}
 
+          {/* Progress track */}
           {pct > 0 && !watched && (
-            <div className="absolute inset-x-0 bottom-0 h-1 bg-white/20 min-[1600px]:h-1.5">
+            <div className="absolute inset-x-0 bottom-0 h-1.5 bg-white/20 min-[1600px]:h-2">
               <div
-                className="h-full bg-gradient-to-r from-[#0d9488] via-[#2dd4bf] to-[#38bdf8]"
+                className="h-full rounded-r-full bg-gradient-to-r from-[#0d9488] via-[#2dd4bf] to-[#38bdf8] shadow-[0_0_10px_rgba(45,212,191,0.8)]"
                 style={{ width: `${pct * 100}%` }}
               />
             </div>
@@ -484,14 +502,15 @@ function FileCardBase({
         </div>
       </div>
 
-      <div className="px-1 pt-2.5 min-[1600px]:pt-3.5">
-        <p className="hc-clamp2 text-sm font-bold leading-snug text-[#e8f1ef] min-[1600px]:text-2xl">
+      {/* Title + meta */}
+      <div className="px-1 pb-0.5 pt-3 min-[1600px]:pt-4">
+        <p className="hc-clamp2 text-sm font-semibold leading-snug text-[#f2f7f6] min-[1600px]:text-2xl">
           {file.file_name}
         </p>
-        <p className="mt-1 flex flex-wrap items-center gap-x-2 gap-y-0.5 text-xs text-[#9db6b1] min-[1600px]:text-base">
-          {variant === "resume" && pos > 0 && !watched ? (
+        <p className="mt-1.5 flex flex-wrap items-center gap-x-2 gap-y-0.5 text-xs text-[#9db6b1] min-[1600px]:mt-2 min-[1600px]:text-base">
+          {resuming ? (
             <span className="inline-flex items-center gap-1 font-semibold text-[#5eead4]">
-              <Clock className="h-3.5 w-3.5" />
+              <Clock className="h-3.5 w-3.5 min-[1600px]:h-5 min-[1600px]:w-5" />
               {fmtTime(pos)}
               {leftLabel ? ` · ${leftLabel}` : ""}
             </span>
@@ -502,12 +521,12 @@ function FileCardBase({
             </span>
           )}
           {variant !== "resume" && pos > 0 && !watched && dur > 0 && (
-            <span className="font-mono text-[#5eead4]/80">
+            <span className="rounded bg-[#2dd4bf]/10 px-1.5 py-0.5 font-mono font-bold leading-none text-[#5eead4]">
               {Math.round(pct * 100)}%
             </span>
           )}
           {risky && (
-            <span className="text-[#fbbf24]/90">may not play here</span>
+            <span className="font-medium text-[#fbbf24]">may not play here</span>
           )}
           {!playable && (
             <span className="text-[#758f8a]">not playable in browser</span>
@@ -515,6 +534,7 @@ function FileCardBase({
         </p>
       </div>
 
+      {/* Manage-mode delete: pops in, rose → solid with white ring when focused */}
       {showDelete && (
         <button
           type="button"
@@ -537,7 +557,7 @@ function FileCardBase({
           onKeyUp={(e) => {
             if (e.key === "Enter" || e.key === " ") e.stopPropagation();
           }}
-          className="hc-focus hc-pop absolute right-4 top-4 inline-flex h-10 w-10 items-center justify-center rounded-xl border border-[#f43f5e]/50 bg-[#2a1215]/95 text-[#fda4af] shadow-lg transition-all duration-150 hover:bg-[#f43f5e] hover:text-white active:scale-90 min-[1600px]:h-14 min-[1600px]:w-14"
+          className="hc-del hc-pop absolute right-4 top-4 z-10 inline-flex h-11 w-11 items-center justify-center rounded-xl border border-[#f43f5e]/60 bg-[#2a1215] text-[#fda4af] shadow-lg transition-all duration-150 hover:bg-[#f43f5e] hover:text-white active:scale-90 min-[1600px]:h-14 min-[1600px]:w-14"
         >
           <Trash2 className="h-5 w-5 min-[1600px]:h-6 min-[1600px]:w-6" />
         </button>
