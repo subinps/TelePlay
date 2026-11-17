@@ -763,15 +763,19 @@ const thumbOrder: number[] = [];
 const thumbPending = new Map<number, Promise<string>>();
 
 function rememberThumb(id: number, url: string) {
-  thumbCache.set(id, url);
-  thumbOrder.push(id);
-  while (thumbOrder.length > THUMB_LIMIT) {
-    const old = thumbOrder.shift();
-    if (old === undefined || old === id) continue;
-    const ou = thumbCache.get(old);
-    if (ou) URL.revokeObjectURL(ou);
-    thumbCache.delete(old);
-  }
+    // Revoke existing URL for this ID if it exists (prevents leaks on re-fetch)
+    const existing = thumbCache.get(id);
+    if (existing) URL.revokeObjectURL(existing);
+
+    thumbCache.set(id, url);
+    thumbOrder.push(id);
+    while (thumbOrder.length > THUMB_LIMIT) {
+        const old = thumbOrder.shift();
+        if (old === undefined || old === id) continue;
+        const ou = thumbCache.get(old);
+        if (ou) URL.revokeObjectURL(ou);
+        thumbCache.delete(old);
+    }
 }
 
 export const cachedThumbnail = (id: number): string | null =>

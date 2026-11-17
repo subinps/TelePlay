@@ -35,9 +35,9 @@ import FileBrowser from './components/FileBrowser';
 import MediaPlayer from './components/MediaPlayer';
 import GlobalContextMenu from './components/GlobalContextMenu';
 import DeleteConfirmModal from './components/DeleteConfirmModal';
-import MoveFileModal from './components/MoveFileModal';
-import NewFolderModal from './components/NewFolderModal';
-import RenameModal from './components/RenameModal';
+// import MoveFileModal from './components/MoveFileModal';
+// import NewFolderModal from './components/NewFolderModal';
+// import RenameModal from './components/RenameModal';
 import Toasts from './components/Toasts';
 
 /* ═══════════════════════════════ Brand ═══════════════════════════════ */
@@ -968,22 +968,8 @@ function HearthApp() {
                         />
                     )}
 
-                    {moveItems && <MoveFileModal items={moveItems} onClose={() => setMoveItems(null)} />}
+                    {/* {moveItems && <MoveFileModal items={moveItems} onClose={() => setMoveItems(null)} />} */}
 
-                    {(renameFile || renameFolder) && (
-                        <RenameModal
-                            file={renameFile}
-                            folder={renameFolder}
-                            onClose={() => { setRenameFile(null); setRenameFolder(null); }}
-                        />
-                    )}
-
-                    {newFolderParentId !== undefined && (
-                        <NewFolderModal
-                            parentId={newFolderParentId}
-                            onClose={() => setNewFolderParentId(undefined)}
-                        />
-                    )}
                 </>
             )}
 

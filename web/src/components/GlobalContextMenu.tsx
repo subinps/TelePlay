@@ -1,31 +1,15 @@
 /**
- * Hearth — GlobalContextMenu  ·  item actions sheet (README §7.4 "ManageSheet", §4.3, §8.4)
+ * Hearth — GlobalContextMenu  ·  simplified item actions sheet
  * ─────────────────────────────────────────────────────────────────────────────
- * BEFORE → AFTER
- *  · cursor-anchored 3-dot menu (unreachable on a TV remote)
- *      → remote-first action sheet: opens on the Menu/ContextMenu key for the focused card,
- *        or whenever any surface sets `activeContextMenu` (store contract preserved)
- *  · Download / Copy Stream URL / Copy Download URL / Create Public Link / Revoke
- *      → removed entirely (§2: no public links, no URL copying, no downloads in a private app)
- *  · Rename / Move to… / multi-select batch menu
- *      → removed from the UI (§4.3 flat library); backend endpoints untouched
- *  · any logged-in user could delete
- *      → Delete is admin-only; guests get Play plus a plain-language note (§4.4, F11)
- *  · Delete fired immediately from the menu
- *      → Delete opens ConfirmDelete (default focus Cancel) via the existing store action
- *  · thumbnail with ?token=<7-day JWT>, window.location.host links (F7/F16)
- *      → Authorization-header blob thumbnail, API-origin resolution, no token in any URL
- *  · backdrop-blur menu, hover-only styling, no focus contract
- *      → solid Hearth surfaces, 4px teal focus ring, focus trap, arrows/OK/Back,
- *        webOS 461 / Tizen 10009, focus restore, scroll lock
- *
- * Coordination: when the Hearth Home (`[data-hb-root]`) is mounted it owns the Menu key
- * (it toggles Manage mode), so this listener stands down — no double handling.
+ * Simplified to keep only:
+ *  · File name & visual header (thumbnail, format, progress)
+ *  · Play / Resume button
+ *  · Delete button (admin-only, opens ConfirmDelete)
  * ─────────────────────────────────────────────────────────────────────────────
  */
 import { useEffect, useRef, useState } from 'react';
 import {
-    AlertTriangle, CheckCircle2, Clock, Film, Folder as FolderIcon, Info,
+    CheckCircle2, Clock, Film, Folder as FolderIcon,
     Loader2, Music, Play, ShieldAlert, Trash2, X,
 } from 'lucide-react';
 import { TelegramFile, Folder, api, formatDuration, formatFileSize } from '../lib/api';
@@ -34,8 +18,6 @@ import { useAppStore } from '../lib/store';
 type HubFile = TelegramFile & {
     mime_type?: string | null;
     completed?: boolean;
-    width?: number | null;
-    height?: number | null;
 };
 
 const ACTIONS_CSS = `
@@ -151,15 +133,6 @@ function SheetThumb({ file }: { file: HubFile }) {
                     <Icon className="h-7 w-7 text-white/35" />
                 </div>
             )}
-        </div>
-    );
-}
-
-function MetaRow({ k, v }: { k: string; v: string }) {
-    return (
-        <div className="flex items-baseline justify-between gap-4 py-1 text-sm min-[1600px]:text-lg">
-            <span className="shrink-0 text-[#9db6b1]">{k}</span>
-            <span className="truncate text-right font-semibold text-[#e8f1ef]">{v}</span>
         </div>
     );
 }
@@ -300,6 +273,29 @@ export default function GlobalContextMenu() {
         setActiveContextMenu(null);
     };
 
+    const actions = [
+        ...(playable ? [{
+            id: 'play',
+            label: watched ? 'Watch again' : pos > 0 ? `Resume from ${fmtTime(pos)}` : 'Play',
+            sublabel: 'Original quality · signed for this device',
+            icon: Play,
+            onClick: doPlay,
+            danger: false,
+            autofocus: true,
+        }] : []),
+        ...(canManage ? [{
+            id: 'delete',
+            label: isFolder ? 'Delete collection…' : 'Delete…',
+            sublabel: isFolder
+                ? 'Videos inside stay in the library'
+                : 'Removes it from Telegram too — you confirm next',
+            icon: Trash2,
+            onClick: doDelete,
+            danger: true,
+            autofocus: !playable,
+        }] : []),
+    ];
+
     return (
         <div
             data-hearth-actions
@@ -317,6 +313,7 @@ export default function GlobalContextMenu() {
             >
                 <div className="h-1 w-full bg-gradient-to-r from-[#2dd4bf] via-[#38bdf8] to-[#fbbf24]" />
 
+                {/* File Name & Visual Header */}
                 <div className="flex items-start gap-4 px-5 pt-5 min-[1600px]:px-8 min-[1600px]:pt-7">
                     {file ? <SheetThumb file={file} /> : (
                         <span className="flex h-20 w-32 shrink-0 items-center justify-center rounded-xl border border-[#2dd4bf]/25 bg-gradient-to-br from-[#2dd4bf]/15 to-[#0d9488]/5 min-[1600px]:h-28 min-[1600px]:w-44">
@@ -364,46 +361,36 @@ export default function GlobalContextMenu() {
                     </button>
                 </div>
 
+                {/* Simplified Actions: Play/Resume and Delete only */}
                 <div className="ha-scroll flex-1 space-y-3 overflow-y-auto px-5 py-5 min-[1600px]:px-8">
-                    {playable && (
-                        <button
-                            type="button"
-                            data-ha-autofocus
-                            onClick={doPlay}
-                            className="ha-focus flex w-full items-center gap-3 rounded-xl bg-[#2dd4bf] px-5 py-4 text-left text-[#04110f] shadow-[0_10px_34px_-10px_rgba(45,212,191,0.7)] transition-all duration-150 hover:bg-[#5eead4] active:scale-[0.99] min-[1600px]:py-5"
-                        >
-                            <Play className="h-6 w-6 shrink-0" />
-                            <span className="min-w-0 flex-1">
-                                <span className="block text-sm font-black min-[1600px]:text-xl">
-                                    {watched ? 'Watch again' : pos > 0 ? `Resume from ${fmtTime(pos)}` : 'Play'}
+                    {actions.map((action) => {
+                        const Icon = action.icon;
+                        return (
+                            <button
+                                key={action.id}
+                                type="button"
+                                {...(action.autofocus ? { 'data-ha-autofocus': true } : {})}
+                                onClick={action.onClick}
+                                className={
+                                    action.danger
+                                        ? 'ha-focus flex w-full items-center gap-3 rounded-xl border border-[#f43f5e]/40 bg-[#f43f5e]/10 px-5 py-4 text-left transition-all duration-150 hover:bg-[#f43f5e]/20 active:scale-[0.99] min-[1600px]:py-5'
+                                        : 'ha-focus flex w-full items-center gap-3 rounded-xl bg-[#2dd4bf] px-5 py-4 text-left text-[#04110f] shadow-[0_10px_34px_-10px_rgba(45,212,191,0.7)] transition-all duration-150 hover:bg-[#5eead4] active:scale-[0.99] min-[1600px]:py-5'
+                                }
+                            >
+                                <Icon className={`h-6 w-6 shrink-0 ${action.danger ? 'text-[#fda4af]' : ''}`} />
+                                <span className="min-w-0 flex-1">
+                                    <span className={`block text-sm min-[1600px]:text-xl ${action.danger ? 'font-bold text-[#fda4af]' : 'font-black'}`}>
+                                        {action.label}
+                                    </span>
+                                    <span className={`block text-xs font-semibold min-[1600px]:text-base ${action.danger ? 'text-[#fda4af]/70' : 'text-[#04110f]/70'}`}>
+                                        {action.sublabel}
+                                    </span>
                                 </span>
-                                <span className="block text-xs font-semibold text-[#04110f]/70 min-[1600px]:text-base">
-                                    Original quality · signed for this device
-                                </span>
-                            </span>
-                        </button>
-                    )}
+                            </button>
+                        );
+                    })}
 
-                    {canManage ? (
-                        <button
-                            type="button"
-                            {...(playable ? {} : { 'data-ha-autofocus': true })}
-                            onClick={doDelete}
-                            className="ha-focus flex w-full items-center gap-3 rounded-xl border border-[#f43f5e]/40 bg-[#f43f5e]/10 px-5 py-4 text-left transition-all duration-150 hover:bg-[#f43f5e]/20 active:scale-[0.99] min-[1600px]:py-5"
-                        >
-                            <Trash2 className="h-6 w-6 shrink-0 text-[#fda4af]" />
-                            <span className="min-w-0 flex-1">
-                                <span className="block text-sm font-bold text-[#fda4af] min-[1600px]:text-xl">
-                                    {isFolder ? 'Delete collection…' : 'Delete…'}
-                                </span>
-                                <span className="block text-xs font-semibold text-[#fda4af]/70 min-[1600px]:text-base">
-                                    {isFolder
-                                        ? 'Videos inside stay in the library'
-                                        : 'Removes it from Telegram too — you confirm next'}
-                                </span>
-                            </span>
-                        </button>
-                    ) : (
+                    {!canManage && (
                         <div className="flex items-start gap-2.5 rounded-xl border border-[#38bdf8]/30 bg-[#38bdf8]/10 px-4 py-3">
                             <ShieldAlert className="mt-0.5 h-4 w-4 shrink-0 text-[#7dd3fc]" />
                             <p className="text-xs font-semibold leading-relaxed text-[#7dd3fc] min-[1600px]:text-base">
@@ -414,39 +401,12 @@ export default function GlobalContextMenu() {
 
                     <button
                         type="button"
-                        {...(playable || canManage ? {} : { 'data-ha-autofocus': true })}
+                        {...(actions.length === 0 ? { 'data-ha-autofocus': true } : {})}
                         onClick={() => setActiveContextMenu(null)}
                         className="ha-focus flex w-full items-center justify-center gap-2 rounded-xl border border-[#2b3a38] bg-[#1a2524] px-5 py-3 text-sm font-semibold text-[#e8f1ef] transition-all duration-150 hover:border-[#2dd4bf]/60 hover:bg-[#22302e] active:scale-[0.99] min-[1600px]:py-4 min-[1600px]:text-lg"
                     >
                         Close
                     </button>
-
-                    <div className="rounded-xl border border-[#1a2524] bg-[#141d1c] px-4 py-3">
-                        <p className="mb-1.5 flex items-center gap-2 text-[11px] font-bold uppercase tracking-[0.14em] text-[#758f8a] min-[1600px]:text-sm">
-                            <Info className="h-3.5 w-3.5 text-[#2dd4bf]" /> Details
-                        </p>
-                        {file ? (
-                            <>
-                                <MetaRow k="Container" v={containerOf(file)} />
-                                <MetaRow k="Size" v={formatFileSize(file.file_size) || '—'} />
-                                <MetaRow k="Duration" v={dur > 0 ? fmtTime(dur) : '—'} />
-                                <MetaRow k="Resolution" v={file.width && file.height ? `${file.width}×${file.height}` : '—'} />
-                                <MetaRow k="Progress" v={watched ? 'Finished' : pos > 0 ? `${fmtTime(pos)} (${Math.round(pct * 100)}%)` : 'Not started'} />
-                            </>
-                        ) : (
-                            <>
-                                <MetaRow k="Videos" v={String(folder?.file_count ?? 0)} />
-                                <MetaRow k="Visibility" v="Hidden on Hearth home" />
-                            </>
-                        )}
-                        {risky && (
-                            <p className="mt-2 flex items-start gap-2 text-xs leading-relaxed text-[#fbbf24] min-[1600px]:text-base">
-                                <AlertTriangle className="mt-0.5 h-3.5 w-3.5 shrink-0" />
-                                {containerOf(file as HubFile)} often carries HEVC/AC3. It plays on Chrome and Android TV;
-                                some TV browsers will refuse it. MP4 (H.264 + AAC) is the safe format.
-                            </p>
-                        )}
-                    </div>
                 </div>
             </div>
         </div>

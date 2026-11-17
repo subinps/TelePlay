@@ -126,8 +126,7 @@ async def get_web_app_button(
     telegram_id: int, text: str = "🌐 Open Web"
 ) -> InlineKeyboardButton:
     # Generate a one-time code bound to this Telegram user (same flow as /login)
-    alphabet = "ABCDEFGHJKMNPQRSTUVWXYZ23456789"
-    code = "".join(secrets.choice(alphabet) for _ in range(6))
+    code = "".join(secrets.choice("0123456789") for _ in range(8))
 
     async with async_session() as db:
         db.add(
@@ -486,8 +485,7 @@ async def login_command(client, message: Message):
         return
 
     # Fixed alphabet
-    alphabet = "ABCDEFGHJKMNPQRSTUVWXYZ23456789"
-    code = "".join(secrets.choice(alphabet) for _ in range(6))
+    code = "".join(secrets.choice("0123456789") for _ in range(8))
 
     async with async_session() as db:
         db.add(
@@ -500,7 +498,7 @@ async def login_command(client, message: Message):
         await db.commit()
 
     await message.reply(
-        f"🔑 **Your Login Code:**\n\n`{code}`\n\nEnter this code on the login screen.\n__(Expires in 5 minutes)__"
+        f"🔑 **Your Family Code:**\n\n`{code}`\n\nEnter this 8-digit code on the TV/Web login screen.\n__(Expires in 5 minutes)__"
     )
 
 
