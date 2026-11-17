@@ -1,28 +1,27 @@
 {
-    "name": "telegram-tv-web",
+    "name": "hearth-web",
     "private": true,
     "version": "1.0.0",
     "type": "module",
+    "description": "Hearth — private Telegram media streaming (web client)",
     "scripts": {
         "dev": "vite",
-        "build": "vite build",
+        "build": "tsc && vite build",
         "preview": "vite preview",
-        "lint": "eslint . --ext ts,tsx --report-unused-disable-directives --max-warnings 0"
+        "lint": "eslint . --ext ts,tsx --report-unused-disable-directives --max-warnings 0",
+        "typecheck": "tsc --noEmit"
     },
     "dependencies": {
         "@tanstack/react-query": "^5.17.0",
         "axios": "^1.6.0",
-        "clsx": "^2.1.0",
         "lucide-react": "^0.303.0",
         "react": "^18.2.0",
         "react-dom": "^18.2.0",
-        "video.js": "^8.6.0",
         "zustand": "^4.4.0"
     },
     "devDependencies": {
         "@types/react": "^18.2.43",
         "@types/react-dom": "^18.2.17",
-        "@types/video.js": "^7.3.0",
         "@typescript-eslint/eslint-plugin": "^6.14.0",
         "@typescript-eslint/parser": "^6.14.0",
         "@vitejs/plugin-legacy": "^5.4.3",
@@ -36,5 +35,15 @@
         "terser": "^5.51.2",
         "typescript": "^5.2.2",
         "vite": "^5.0.8"
-    }
+    },
+    "engines": {
+        "node": ">=18.0.0",
+        "npm": ">=9.0.0"
+    },
+    "browserslist": [
+        "chrome >= 53",
+        "safari >= 11",
+        "edge >= 79",
+        "firefox >= 78"
+    ]
 }

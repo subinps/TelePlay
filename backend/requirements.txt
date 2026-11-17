@@ -1,35 +1,65 @@
-# TelePlay Backend
+# ============================================================================
+# TelePlay/Hearth Backend — Production Dependencies
+# ============================================================================
+# Pinned for reproducible builds on Python 3.14 + 512 MB VPS.
+# Last verified: 2026-11-17
 
-# Telegram MTProto Client
-pyrotgfork>=2.2.0
-# Fast C crypto (maintained PyroTGFork fork; provides the `tgcrypto` module).
-# Ships cp313 + cp314 wheels. If client.start() ever raises a bytearray TypeError
-# on your platform, comment this out — Pyrogram falls back to pyaes (slower).
-TgCrypto-pyrofork>=1.2.8
+# ── Telegram MTProto Client ─────────────────────────────────────────────────
+pyrotgfork==2.2.0
+# PyroTGFork is a maintained Pyrogram fork with improved async handling.
+# Required for: bot.py, telegram.py
 
-# Web Framework
-fastapi>=0.109.0
-uvicorn[standard]>=0.27.0
+TgCrypto-pyrofork==1.2.8
+# Fast C crypto acceleration for PyroTGFork. Ships cp313 + cp314 wheels.
+# Without this, Pyrogram falls back to pure-Python pyaes (10x slower).
+# If client.start() raises bytearray TypeError on your platform, comment this out.
 
-# Database
-sqlalchemy>=2.0.0
-asyncpg>=0.29.0
-aiosqlite>=0.19.0
-alembic>=1.13.0
+# ── Web Framework ───────────────────────────────────────────────────────────
+fastapi==0.115.5
+# FastAPI 0.115.x is the latest stable release with full Pydantic v2 support.
+# Required for: main.py, all routers
 
-# Validation
-pydantic>=2.5.0
-pydantic-settings>=2.1.0
+uvicorn[standard]==0.32.1
+# ASGI server with websockets, httptools, and uvloop support.
+# [standard] includes uvloop (faster event loop) and httptools (faster HTTP parser).
+# Required for: main.py
 
-# Authentication
-python-jose[cryptography]>=3.3.0
-passlib[bcrypt]>=1.7.4
+# ── Database ────────────────────────────────────────────────────────────────
+sqlalchemy[asyncio]==2.0.36
+# SQLAlchemy 2.0.x with async support. Required for: database.py, all routers, models.
+# [asyncio] installs asyncpg/aiosqlite extras automatically.
 
-# Utilities
-python-multipart>=0.0.6
-aiofiles>=23.2.0
+asyncpg==0.30.0
+# High-performance async PostgreSQL driver. Required for: database.py.
+# Used with Neon PostgreSQL (your production DB).
 
-# Rate Limiting
-slowapi>=0.1.9
+# ── Validation & Settings ──────────────────────────────────────────────────
+pydantic==2.10.3
+# Pydantic v2 for request/response validation. Required for: schemas.py, all routers.
 
-psutil>=6.1.0
+pydantic-settings==2.7.1
+# Settings management with .env file support. Required for: config.py.
+
+# ── Authentication ──────────────────────────────────────────────────────────
+python-jose[cryptography]==3.3.0
+# JWT encoding/decoding with cryptography backend. Required for: auth.py.
+# [cryptography] uses the fast cryptography library instead of pycryptodome.
+
+# ── Rate Limiting ───────────────────────────────────────────────────────────
+slowapi==0.1.9
+# Rate limiting for FastAPI (legacy routes still use it). Required for: main.py.
+# Note: New auth routes use our custom app.ratelimit module instead.
+
+# ── Utilities ───────────────────────────────────────────────────────────────
+psutil==6.1.0
+# System metrics (memory usage) for /health endpoint. Required for: main.py.
+
+# ============================================================================
+# REMOVED (unused in production code):
+# ============================================================================
+# passlib[bcrypt]     — We use hmac with JWT secret for PIN hashing
+# python-multipart    — No file uploads in API (files come via Telegram bot)
+# aiofiles            — No async file I/O in our code
+# aiosqlite           — We use Neon PostgreSQL, not SQLite
+# alembic             — Not used (we do create_all() and manual migrations)
+# ============================================================================

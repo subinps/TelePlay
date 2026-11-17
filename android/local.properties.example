@@ -1,6 +1,0 @@
-# Copy this to local.properties and configure
-# Android SDK location (required)
-sdk.dir=C:\\Users\\YOUR_USERNAME\\AppData\\Local\\Android\\Sdk
-
-# Default server URL (optional - can also be configured in app settings)
-TELEGRAM_TV_SERVER_URL=http://your-server-ip:8000

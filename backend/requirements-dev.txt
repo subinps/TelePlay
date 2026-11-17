@@ -1,1 +1,36 @@
-pytest>=8.0
+# ============================================================================
+# TelePlay/Hearth Backend — Development Dependencies
+# ============================================================================
+# Install with: pip install -r requirements-dev.txt
+# These are only needed for local development and testing, not in production.
+
+# Include all production dependencies
+-r requirements.txt
+
+# ── Testing ─────────────────────────────────────────────────────────────────
+pytest==8.3.4
+# Test framework. Required for: tests/
+
+pytest-asyncio==0.24.0
+# Async test support for pytest. Required for: async test fixtures.
+
+httpx==0.28.1
+# Async HTTP client for FastAPI TestClient. Required for: API integration tests.
+
+pytest-cov==6.0.0
+# Coverage reporting for pytest. Optional but recommended.
+
+# ── Code Quality ────────────────────────────────────────────────────────────
+ruff==0.8.4
+# Fast Python linter and formatter. Run with: ruff check .
+
+mypy==1.13.0
+# Static type checker. Run with: mypy app/
+
+# ── Development Utilities ───────────────────────────────────────────────────
+ipdb==0.13.13
+# Interactive debugger. Use `import ipdb; ipdb.set_trace()` in code.
+
+python-dotenv==1.0.1
+# .env file loading for local development. (pydantic-settings also loads .env,
+# but this is useful for scripts that don't import app code.)
