@@ -1,34 +1,34 @@
 /**
- * Hearth — API layer  (README §4.6, §6.3, §6.4, §6.8, §7.2; fixes F7, F9, F10, F11, F16)
- * ─────────────────────────────────────────────────────────────────────────────
- * KEPT (working logic)
- *   axios instance + bearer header + single-flight refresh, React Query hooks,
- *   every legacy export the existing screens import (useFiles, useFolders, useFolderTree,
- *   useRecentFiles, useContinueWatching, useCreateFolder, useUpdateFile, useUpdateFolder,
- *   useDeleteFile(s), useDeleteFolder(s), useMoveFiles, useMoveFolders, useFile,
- *   useUpdateProgress, formatDuration, formatFileSize, TelegramFile, Folder, api).
- *
- * FIXED
- *   F16  every path resolves against the API origin (apiUrl / API_ORIGIN) — never the
- *        Pages origin, so thumbnails and streams stop 404ing on a split deployment.
- *   F7   playback uses POST /playback/start → a short, per-file, per-device signed URL.
- *        No 7-day login JWT is ever placed in a media URL.
- *   F10  thumbnails are fetched with the Authorization header and turned into blob URLs
- *        (LRU-cached, revoked on eviction) instead of leaking a token into <img src>.
- *   F9   progress writes patch the query cache in place (no 10 s refetch storm) and let the
- *        server own the `completed` flag at 95 %.
- *   F11  guests get clean 403s surfaced as readable messages, never silent failures.
- *
- * ADDED
- *   playback session hooks (start / heartbeat / stop / active / kick) with the 409
- *   DEVICE_LIMIT payload typed, /auth/me role, /auth/bot-info, typed query-key factory,
- *   readable error extraction, and route-drift tolerance during the phased rollout.
- *
- * COMPATIBILITY
- *   Mutation results expose `isPending` AND `isLoading` so screens written against either
- *   React Query v4 or v5 behave identically. No v4/v5-only options are used.
- * ─────────────────────────────────────────────────────────────────────────────
- */
+Hearth — API layer  (README §4.6, §6.3, §6.4, §6.8, §7.2; fixes F7, F9, F10, F11, F16)
+─────────────────────────────────────────────────────────────────────────────
+KEPT (working logic)
+axios instance + bearer header + single-flight refresh, React Query hooks,
+every legacy export the existing screens import (useFiles, useFolders, useFolderTree,
+useRecentFiles, useContinueWatching, useCreateFolder, useUpdateFile, useUpdateFolder,
+useDeleteFile(s), useDeleteFolder(s), useMoveFiles, useMoveFolders, useFile,
+useUpdateProgress, formatDuration, formatFileSize, TelegramFile, Folder, api).
+
+FIXED
+F16  every path resolves against the API origin (apiUrl / API_ORIGIN) — never the
+   Pages origin, so thumbnails and streams stop 404ing on a split deployment.
+F7   playback uses POST /playback/start → a short, per-file, per-device signed URL.
+   No 7-day login JWT is ever placed in a media URL.
+F10  thumbnails are fetched with the Authorization header and turned into blob URLs
+   (LRU-cached, revoked on eviction) instead of leaking a token into <img src>.
+F9   progress writes patch the query cache in place (no 10 s refetch storm) and let the
+   server own the `completed` flag at 95 %.
+F11  guests get clean 403s surfaced as readable messages, never silent failures.
+
+ADDED
+playback session hooks (start / heartbeat / stop / active / kick) with the 409
+DEVICE_LIMIT payload typed, /auth/me role, /auth/bot-info, typed query-key factory,
+readable error extraction, and route-drift tolerance during the phased rollout.
+
+COMPATIBILITY
+Mutation results expose `isPending` AND `isLoading` so screens written against either
+React Query v4 or v5 behave identically. No v4/v5-only options are used.
+─────────────────────────────────────────────────────────────────────────────
+*/
 import axios from "axios";
 import type { AxiosError, AxiosRequestConfig } from "axios";
 import {
@@ -87,6 +87,7 @@ const read = (k: string): string | null => {
     return null;
   }
 };
+
 const write = (k: string, v: string) => {
   try {
     localStorage.setItem(k, v);
@@ -94,6 +95,7 @@ const write = (k: string, v: string) => {
     /* private mode */
   }
 };
+
 const drop = (k: string) => {
   try {
     localStorage.removeItem(k);
@@ -116,6 +118,7 @@ export function setTokens(tokens: TokenPair): void {
   if (tokens?.access_token) write(ACCESS_KEY, tokens.access_token);
   if (tokens?.refresh_token) write(REFRESH_KEY, tokens.refresh_token);
 }
+
 export function clearTokens(): void {
   drop(ACCESS_KEY);
   drop(REFRESH_KEY);
@@ -317,7 +320,17 @@ api.interceptors.request.use((config) => {
   return config;
 });
 
-const AUTH_ROUTES = ['/auth/verify-code', '/auth/refresh', '/auth/guest/login', '/auth/logout-all', '/auth/login', '/auth/guest-login', '/auth/guest', '/auth/logout'];
+const AUTH_ROUTES = [
+  "/auth/verify-code",
+  "/auth/refresh",
+  "/auth/guest/login",
+  "/auth/logout-all",
+  "/auth/login",
+  "/auth/guest-login",
+  "/auth/guest",
+  "/auth/logout",
+];
+
 const isAuthRoute = (url?: string) =>
   !!url && AUTH_ROUTES.some((r) => url.includes(r));
 
@@ -326,12 +339,14 @@ let refreshPromise: Promise<string> | null = null;
 async function refreshAccessToken(): Promise<string> {
   const refresh = getRefreshToken();
   if (!refresh) throw new Error("no refresh token");
+
   // Plain axios: bypasses our interceptors so a 401 here cannot recurse.
   const { data } = await axios.post<TokenPair>(
     apiUrl(`${API_BASE}/auth/refresh`),
     { refresh_token: refresh },
     { headers: { "Content-Type": "application/json" }, timeout: 20000 },
   );
+
   if (!data?.access_token) throw new Error("refresh returned no token");
   setTokens(data);
   emit(AUTH_CHANGED_EVENT, { authenticated: true });
@@ -349,6 +364,7 @@ api.interceptors.response.use(
     if (status !== 401 || !config || config._retry || isAuthRoute(config.url)) {
       return Promise.reject(error);
     }
+
     if (!getRefreshToken()) {
       clearTokens();
       emit(AUTH_EXPIRED_EVENT);
@@ -356,12 +372,14 @@ api.interceptors.response.use(
     }
 
     config._retry = true;
+
     try {
       refreshPromise =
         refreshPromise ??
         refreshAccessToken().finally(() => {
           refreshPromise = null;
         });
+
       const token = await refreshPromise;
       const headers = (config.headers ?? {}) as Record<string, unknown>;
       headers.Authorization = `Bearer ${token}`;
@@ -453,10 +471,10 @@ function normalisePage(
 }
 
 function normaliseRole(value: unknown): UserRole {
-    const r = (value as { role?: string; user?: { role?: string } } | null)?.role
-        ?? (value as { user?: { role?: string } } | null)?.user?.role;
-    // Fail closed: default to least privilege (guest) until explicitly confirmed as admin
-    return r === 'admin' ? 'admin' : 'guest';
+  const r = (value as { role?: string; user?: { role?: string } } | null)?.role
+    ?? (value as { user?: { role?: string } } | null)?.user?.role;
+  // Fail closed: default to least privilege (guest) until explicitly confirmed as admin
+  return r === "admin" ? "admin" : "guest";
 }
 
 function normaliseMe(data: unknown): Me {
@@ -547,6 +565,7 @@ export async function startPlayback(fileId: number): Promise<PlaybackStart> {
     device_id: getDeviceId(),
     device_label: getDeviceLabel(),
   });
+
   return {
     stream_url: resolveBackendPath(data.stream_url),
     token: data.token,
@@ -763,19 +782,18 @@ const thumbOrder: number[] = [];
 const thumbPending = new Map<number, Promise<string>>();
 
 function rememberThumb(id: number, url: string) {
-    // Revoke existing URL for this ID if it exists (prevents leaks on re-fetch)
-    const existing = thumbCache.get(id);
-    if (existing) URL.revokeObjectURL(existing);
-
-    thumbCache.set(id, url);
-    thumbOrder.push(id);
-    while (thumbOrder.length > THUMB_LIMIT) {
-        const old = thumbOrder.shift();
-        if (old === undefined || old === id) continue;
-        const ou = thumbCache.get(old);
-        if (ou) URL.revokeObjectURL(ou);
-        thumbCache.delete(old);
-    }
+  // Revoke existing URL for this ID if it exists (prevents leaks on re-fetch)
+  const existing = thumbCache.get(id);
+  if (existing) URL.revokeObjectURL(existing);
+  thumbCache.set(id, url);
+  thumbOrder.push(id);
+  while (thumbOrder.length > THUMB_LIMIT) {
+    const old = thumbOrder.shift();
+    if (old === undefined || old === id) continue;
+    const ou = thumbCache.get(old);
+    if (ou) URL.revokeObjectURL(ou);
+    thumbCache.delete(old);
+  }
 }
 
 export const cachedThumbnail = (id: number): string | null =>
@@ -822,6 +840,7 @@ export function useThumbnailUrl(
   const [url, setUrl] = useState<string | null>(() =>
     fileId != null ? cachedThumbnail(fileId) : null,
   );
+
   useEffect(() => {
     if (fileId == null || !path || !enabled) {
       setUrl(null);
@@ -844,12 +863,14 @@ export function useThumbnailUrl(
       live = false;
     };
   }, [fileId, path, enabled]);
+
   return url;
 }
 
 /* ═══════════════════════════════ React Query hooks ═══════════════════════════════ */
 
 type AnyMutation = UseMutationResult<unknown, unknown, unknown, unknown>;
+
 /** v4 calls it isLoading, v5 calls it isPending — expose both so screens never break. */
 function compat<T extends object>(
   m: T,
@@ -1070,7 +1091,6 @@ function patchProgressCaches(
 ) {
   const dur = p.duration && p.duration > 0 ? p.duration : undefined;
   const completed = dur ? p.position >= dur * 0.95 : undefined;
-
   const patch = (f: TelegramFile): TelegramFile => ({
     ...f,
     last_pos: p.position,
@@ -1087,6 +1107,7 @@ function patchProgressCaches(
       q.queryKey[0] === "continue-watching" ||
       q.queryKey[0] === "recent",
   });
+
   for (const entry of lists) {
     const data = entry.state.data as { files?: TelegramFile[] } | undefined;
     if (!data?.files?.length) continue;

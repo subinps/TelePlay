@@ -1,82 +1,273 @@
 """
-backend/app/playback.py — 2-device concurrent-playback limiter.
-In-memory implementation (single process, no DB overhead).
+backend/app/playback.py — concurrent-playback limiter with ownership + revocation.
+
+What this enforces
+------------------
+1. CONCURRENCY: at most `settings.max_playback_devices` distinct devices play at
+   once. A device is a stable client-generated id (localStorage UUID), so a
+   refresh, a new tab or the next episode never consumes a second slot.
+
+2. OWNERSHIP: every session records the owning User.id. Heartbeat/stop can be
+   scoped to the caller so one account cannot manipulate another's device.
+
+3. REVOCATION: `kick()` sets a per-device wall-clock floor. A signed stream
+   token whose `iat` predates that floor is refused, so a kicked device cannot
+   re-register with its still-cryptographically-valid 12-hour URL. A NEW
+   authenticated `/playback/start` (reactivate=True) is always allowed and
+   mints a token with a newer `iat` — kicking frees a slot, it does not ban the
+   hardware forever.
+
+Three distinct lifecycle events (do not conflate them)
+------------------------------------------------------
+  stop()      normal end of playback / logout  -> slot freed, device may return
+  TTL expiry  device went silent               -> slot freed, silent re-register
+  kick()      deliberate admin revocation      -> slot freed + old tokens dead
+
+Entry points
+------------
+  start(..., reactivate=True)   authenticated POST /playback/start (chat #7)
+  start(..., issued_at=iat)     media path re-register from a signed token (#8)
+  start(...)                    neither -> conservative: honours any revocation
+
+Process model
+-------------
+State is in-process by design (Telegram clients, byte cache and login limiter
+are too). Run uvicorn with --workers 1. A restart clears sessions, which is
+safe: it frees slots, and revocation floors are re-established by the durable
+guest-credential version and by re-issuing tokens. Memory is bounded.
 """
+
+from __future__ import annotations
+
+import logging
 import time
 from dataclasses import dataclass, field
-from typing import Callable, List
+from typing import Callable, Optional
 
 from .config import get_settings
+
+logger = logging.getLogger(__name__)
+settings = get_settings()
+
+__all__ = ["PlaybackSession", "PlaybackLimiter", "limiter"]
+
+# Wall-clock revocation floors older than the longest possible stream-token
+# lifetime are useless (every such token has expired) and are pruned.
+_REVOCATION_KEEP_SECONDS = max(1, int(settings.stream_token_hours)) * 3600 + 3600
+_MAX_REVOCATION_ENTRIES = 1000
+
 
 @dataclass
 class PlaybackSession:
     device_id: str
     label: str
-    role: str            # "admin" | "guest"
+    role: str                       # "admin" | "guest"
     file_id: int
+    owner_id: Optional[int] = None  # User.id of the account that started it
     last_seen: float = field(default_factory=time.monotonic)
+    started_at: float = field(default_factory=time.monotonic)
+
 
 class PlaybackLimiter:
-    def __init__(self, max_devices: int = 2, ttl: float = 75.0, clock: Callable[[], float] = time.monotonic):
-        self.max_devices = max_devices
-        self.ttl = ttl
+    """In-memory device slots + per-device token revocation floors."""
+
+    def __init__(
+        self,
+        max_devices: int = 2,
+        ttl: float = 75.0,
+        clock: Callable[[], float] = time.monotonic,
+    ) -> None:
+        self.max_devices = max(1, int(max_devices))
+        self.ttl = max(1.0, float(ttl))
         self.clock = clock
         self._sessions: dict[str, PlaybackSession] = {}
+        # device_id -> wall-clock instant; tokens issued before this are dead.
+        self._revoked_before: dict[str, float] = {}
 
-    def _purge(self):
-        """Remove sessions that haven't sent a heartbeat in a while."""
+    # ── internal maintenance ────────────────────────────────────────────────
+
+    def _purge(self) -> None:
+        """Drop sessions that stopped heartbeating."""
         now = self.clock()
-        for k in [k for k, v in self._sessions.items() if now - v.last_seen > self.ttl]:
-            del self._sessions[k]
+        for key in [k for k, s in self._sessions.items() if now - s.last_seen > self.ttl]:
+            del self._sessions[key]
 
-    def active(self) -> List[PlaybackSession]:
-        """Get list of currently active sessions."""
+    def _prune_revocations(self) -> None:
+        """Bound memory: forget floors whose tokens have all expired by now."""
+        if not self._revoked_before:
+            return
+        cutoff = time.time() - _REVOCATION_KEEP_SECONDS
+        for key in [k for k, v in self._revoked_before.items() if v < cutoff]:
+            del self._revoked_before[key]
+        while len(self._revoked_before) > _MAX_REVOCATION_ENTRIES:
+            oldest = min(self._revoked_before, key=self._revoked_before.get)
+            del self._revoked_before[oldest]
+
+    # ── revocation ──────────────────────────────────────────────────────────
+
+    def is_revoked(self, device_id: str, issued_at: float | None = None) -> bool:
+        """
+        True when this device's token is revoked.
+
+        issued_at=None  -> conservative: any active floor counts as revoked.
+        issued_at=<iat> -> revoked only if the token predates the floor.
+        """
+        self._prune_revocations()
+        floor = self._revoked_before.get(device_id)
+        if floor is None:
+            return False
+        if issued_at is None:
+            return True
+        try:
+            return float(issued_at) < floor
+        except (TypeError, ValueError):
+            return True
+
+    def kick(self, device_id: str) -> None:
+        """Admin revocation: free the slot AND kill every already-issued token."""
+        self._revoked_before[device_id] = time.time()
+        self._sessions.pop(device_id, None)
+        self._prune_revocations()
+        logger.info("Playback device kicked and revoked: %s", device_id)
+
+    def clear_revocation(self, device_id: str) -> None:
+        """Admin escape hatch (rarely needed; a fresh start already works)."""
+        self._revoked_before.pop(device_id, None)
+
+    # ── queries ─────────────────────────────────────────────────────────────
+
+    def active(self) -> list[PlaybackSession]:
         self._purge()
         return list(self._sessions.values())
 
-    def start(self, device_id: str, label: str, role: str, file_id: int) -> tuple[bool, List[PlaybackSession]]:
-        """
-        Attempt to start a stream.
-        Returns (ok, active_sessions).
-        Same device re-starting (refresh, next video) never counts twice.
-        """
-        self._purge()
-        if device_id not in self._sessions and len(self._sessions) >= self.max_devices:
-            return False, list(self._sessions.values())
-            
-        self._sessions[device_id] = PlaybackSession(
-            device_id=device_id,
-            label=label,
-            role=role,
-            file_id=file_id,
-            last_seen=self.clock()
-        )
-        return True, list(self._sessions.values())
+    def active_for(self, owner_id: int | None) -> list[PlaybackSession]:
+        """Sessions belonging to one account (used to scope /playback/active)."""
+        return [s for s in self.active() if s.owner_id == owner_id]
 
-    def heartbeat(self, device_id: str, file_id: int | None = None) -> bool:
-        """Update the last_seen time for a device. Returns False if session expired/kicked."""
+    def get(self, device_id: str) -> PlaybackSession | None:
         self._purge()
-        s = self._sessions.get(device_id)
-        if not s:
-            return False
-        s.last_seen = self.clock()
-        if file_id is not None:
-            s.file_id = file_id
-        return True
+        return self._sessions.get(device_id)
 
     def is_active(self, device_id: str) -> bool:
-        """Check if a device is currently active."""
         self._purge()
         return device_id in self._sessions
 
-    def stop(self, device_id: str):
-        """Stop a specific device."""
+    def owns(self, device_id: str, owner_id: int | None) -> bool:
+        """True only when the session exists AND belongs to this account."""
+        session = self.get(device_id)
+        return session is not None and session.owner_id == owner_id
+
+    # ── lifecycle ───────────────────────────────────────────────────────────
+
+    def start(
+        self,
+        device_id: str,
+        label: str,
+        role: str,
+        file_id: int,
+        *,
+        owner_id: int | None = None,
+        issued_at: float | None = None,
+        reactivate: bool = False,
+    ) -> tuple[bool, list[PlaybackSession]]:
+        """
+        Acquire or refresh a slot. Returns (ok, active_sessions).
+
+        reactivate=True  -> authenticated /playback/start; ignores the floor
+                            (the caller proved identity with a bearer token).
+        issued_at=<iat>  -> media path; refused if the token predates a kick.
+        neither          -> conservative; refused while any floor exists.
+
+        Re-starting the SAME device never consumes a second slot.
+        """
+        self._purge()
+
+        if not reactivate and self.is_revoked(device_id, issued_at):
+            logger.info("Refused revoked device %s", device_id)
+            return False, list(self._sessions.values())
+
+        if device_id not in self._sessions and len(self._sessions) >= self.max_devices:
+            return False, list(self._sessions.values())
+
+        now = self.clock()
+        existing = self._sessions.get(device_id)
+        self._sessions[device_id] = PlaybackSession(
+            device_id=device_id,
+            label=(label or "Device")[:40],
+            role="admin" if role == "admin" else "guest",
+            file_id=int(file_id),
+            owner_id=owner_id if owner_id is not None else (existing.owner_id if existing else None),
+            last_seen=now,
+            started_at=existing.started_at if existing else now,
+        )
+        return True, list(self._sessions.values())
+
+    def heartbeat(
+        self,
+        device_id: str,
+        file_id: int | None = None,
+        *,
+        owner_id: int | None = None,
+    ) -> bool:
+        """
+        Keep a session alive. False => expired, kicked or not yours.
+
+        owner_id=None keeps backwards compatibility with older callers; the
+        playback router (chat #7) always passes it.
+        """
+        self._purge()
+        session = self._sessions.get(device_id)
+        if session is None:
+            return False
+        if owner_id is not None and session.owner_id != owner_id:
+            logger.warning("Heartbeat owner mismatch for device %s", device_id)
+            return False
+        if self.is_revoked(device_id):
+            self._sessions.pop(device_id, None)
+            return False
+        session.last_seen = self.clock()
+        if file_id is not None:
+            session.file_id = int(file_id)
+        return True
+
+    def stop(self, device_id: str, *, owner_id: int | None = None) -> bool:
+        """
+        Normal end of playback (player closed, logout, next file).
+
+        Frees the slot WITHOUT revoking — the device may start again freely.
+        Returns False when the session is not yours.
+        """
+        session = self._sessions.get(device_id)
+        if session is None:
+            return True
+        if owner_id is not None and session.owner_id != owner_id:
+            logger.warning("Stop owner mismatch for device %s", device_id)
+            return False
         self._sessions.pop(device_id, None)
+        return True
 
-    def stop_role(self, role: str):
-        """Stop all sessions with a specific role (e.g. when rotating guest PIN)."""
-        for k in [k for k, v in self._sessions.items() if v.role == role]:
-            del self._sessions[k]
+    def stop_role(self, role: str) -> None:
+        """Drop every session of a role (guest PIN rotated / disabled)."""
+        for key in [k for k, s in self._sessions.items() if s.role == role]:
+            del self._sessions[key]
 
-# Instantiate the global limiter for the app (wired to validated settings)
-limiter = PlaybackLimiter(max_devices=get_settings().max_playback_devices)
+    # ── diagnostics ─────────────────────────────────────────────────────────
+
+    def stats(self) -> dict[str, int]:
+        """Non-sensitive counters for admin/health output."""
+        self._purge()
+        self._prune_revocations()
+        return {
+            "active_devices": len(self._sessions),
+            "max_devices": self.max_devices,
+            "ttl_seconds": int(self.ttl),
+            "heartbeat_seconds": int(settings.playback_heartbeat_seconds),
+            "revoked_devices": len(self._revoked_before),
+        }
+
+
+# Single process-wide instance, wired to validated settings.
+limiter = PlaybackLimiter(
+    max_devices=settings.max_playback_devices,
+    ttl=settings.playback_session_ttl_seconds,
+)
