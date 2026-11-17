@@ -1,22 +1,22 @@
 """
 JWT authentication utilities.
 """
+import hashlib
+import hmac
+import time
 from datetime import datetime, timedelta
 from typing import Optional
-import time
-import hmac
-import hashlib
 
-from jose import jwt, JWTError
-from fastapi import Depends, HTTPException, status, Request
-from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
-from sqlalchemy.ext.asyncio import AsyncSession
+from fastapi import Depends, HTTPException, Request, status
+from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
+from jose import JWTError, jwt
 from sqlalchemy import select
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from .config import get_settings
 from .database import get_db
 from .models import User
-from .schemas import TokenPayload
+from .schemas import TokenPayload  # noqa: F401
 
 settings = get_settings()
 security = HTTPBearer(auto_error=False)

@@ -1,21 +1,18 @@
 """
 TV-specific API endpoints optimized for Android TV clients.
 """
-from typing import List
+from typing import List  # noqa: F401, UP035
+
 from fastapi import APIRouter, Depends, Query
+from sqlalchemy import desc, select
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy import select, desc
 from sqlalchemy.orm import selectinload
 
-from ..database import get_db
-from ..models import File, User, Folder
 from ..auth import get_current_user
 from ..config import get_settings
-from ..services import (
-    escape_like, 
-    add_urls_to_file, 
-    fetch_continue_watching_files
-)
+from ..database import get_db
+from ..models import File, Folder, User
+from ..services import add_urls_to_file, escape_like, fetch_continue_watching_files
 
 router = APIRouter(prefix="/tv", tags=["TV"])
 settings = get_settings()

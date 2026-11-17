@@ -1,15 +1,17 @@
 """
 Folder management API endpoints.
 """
-from typing import Optional, List
-from fastapi import APIRouter, Depends, HTTPException, Query
-from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy import select, func, text, delete as sqlalchemy_delete, update
+from typing import List, Optional  # noqa: UP035
 
-from ..database import get_db
-from ..models import Folder, File, User
-from ..schemas import FolderResponse, FolderCreate, FolderUpdate, FolderWithChildren
+from fastapi import APIRouter, Depends, HTTPException, Query
+from sqlalchemy import delete as sqlalchemy_delete
+from sqlalchemy import func, select, text, update
+from sqlalchemy.ext.asyncio import AsyncSession
+
 from ..auth import get_current_user
+from ..database import get_db
+from ..models import File, Folder, User
+from ..schemas import FolderCreate, FolderResponse, FolderUpdate, FolderWithChildren
 from ..telegram import delete_from_storage_channel
 from .streaming import invalidate_meta
 

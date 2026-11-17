@@ -5,7 +5,7 @@ Based on Claude's Hearth upgrade plan.
 from fastapi import APIRouter, Depends, HTTPException, Response
 from pydantic import BaseModel, Field
 
-from ..auth import get_current_user, require_admin, create_stream_token
+from ..auth import create_stream_token, get_current_user, require_admin
 from ..models import User
 from ..playback import limiter
 from .streaming import get_meta
