@@ -9,10 +9,10 @@
  */
 import { useEffect, useRef, useState } from 'react';
 import {
-    CheckCircle2, Clock, Film, Folder as FolderIcon,
+    CheckCircle2, Clock, Film,
     Loader2, Music, Play, Trash2,
 } from 'lucide-react';
-import { TelegramFile, Folder, api, formatDuration, formatFileSize } from '../lib/api';
+import { TelegramFile, api, formatDuration, formatFileSize } from '../lib/api';
 import { useAppStore, useRole } from '../lib/store';
 
 type HubFile = TelegramFile & {
@@ -76,6 +76,7 @@ const isRisky = (f: HubFile) => {
 };
 
 const thumbCache = new Map<number, string>();
+const thumbOrder: number[] = [];
 function useThumbnail(fileId: number, url?: string | null): string | null {
     const [src, setSrc] = useState<string | null>(() => thumbCache.get(fileId) ?? null);
     useEffect(() => {
@@ -87,7 +88,20 @@ function useThumbnail(fileId: number, url?: string | null): string | null {
             .then(({ data }) => {
                 if (!live) return;
                 const obj = URL.createObjectURL(data as Blob);
+                const previous = thumbCache.get(fileId);
+                if (previous) URL.revokeObjectURL(previous);
                 thumbCache.set(fileId, obj);
+                const previousIndex = thumbOrder.indexOf(fileId);
+                if (previousIndex !== -1) thumbOrder.splice(previousIndex, 1);
+                thumbOrder.push(fileId);
+                if (thumbOrder.length > 48) {
+                    const oldestId = thumbOrder.shift();
+                    if (oldestId !== undefined) {
+                        const oldestUrl = thumbCache.get(oldestId);
+                        if (oldestUrl) URL.revokeObjectURL(oldestUrl);
+                        thumbCache.delete(oldestId);
+                    }
+                }
                 setSrc(obj);
             })
             .catch(() => { if (live) setSrc(null); });
@@ -132,11 +146,14 @@ export default function GlobalContextMenu() {
     const [opening, setOpening] = useState(false);
 
     const open = !!activeContextMenu;
-    const item = activeContextMenu?.item as HubFile | Folder | undefined;
-    const isFolder = !!item && !('file_name' in item);
-    const file = !isFolder ? (item as HubFile | undefined) : undefined;
-    const folder = isFolder ? (item as Folder) : undefined;
+    const file = activeContextMenu?.item as HubFile | undefined;
     const canManage = role === 'admin';
+    useEffect(() => {
+        if (open && (!file || typeof file.file_name !== 'string')) {
+            setActiveContextMenu(null);
+        }
+    }, [file, open, setActiveContextMenu]);
+
     /* The player owns the screen — never leave a stale sheet behind it. */
     useEffect(() => {
         if (previewFile && activeContextMenu) setActiveContextMenu(null);
@@ -175,7 +192,7 @@ export default function GlobalContextMenu() {
 
     /* Focus, scroll lock and focus restore while the sheet is open. */
     useEffect(() => {
-        if (!open) return;
+        if (!open || !file || typeof file.file_name !== 'string') return;
         restoreRef.current = document.activeElement as HTMLElement | null;
         const prevOverflow = document.body.style.overflow;
         document.body.style.overflow = 'hidden';
@@ -190,7 +207,7 @@ export default function GlobalContextMenu() {
             const back = restoreRef.current;
             if (back && back.isConnected) back.focus();
         };
-    }, [open]);
+    }, [file, open]);
 
     /* Back keys close the sheet; ordinary Tab navigation remains untrapped. */
     useEffect(() => {
@@ -205,7 +222,7 @@ export default function GlobalContextMenu() {
         return () => window.removeEventListener('keydown', onKey, true);
     }, [open, setActiveContextMenu]);
 
-    if (!open || !item) {
+    if (!open || !file || typeof file.file_name !== 'string') {
         return opening ? (
             <div data-hearth-actions className="pointer-events-none fixed bottom-8 left-1/2 z-[190] -translate-x-1/2">
                 <div className="ha-pop flex items-center gap-2 rounded-xl border border-[#2dd4bf]/35 bg-[#0e1514]/95 px-4 py-2 text-sm font-semibold text-[#5eead4] shadow-xl">
@@ -221,7 +238,7 @@ export default function GlobalContextMenu() {
     const dur = file?.duration ?? 0;
     const pct = dur > 0 ? clamp(pos / dur, 0, 1) : 0;
     const watched = !!file?.completed || (dur > 0 && pos >= dur * 0.95);
-    const title = file?.file_name ?? folder?.name ?? 'Item';
+    const title = file.file_name;
 
     const doPlay = () => {
         if (!file) return;
@@ -246,10 +263,8 @@ export default function GlobalContextMenu() {
         }] : []),
         ...(canManage ? [{
             id: 'delete',
-            label: isFolder ? 'Delete collection…' : 'Delete…',
-            sublabel: isFolder
-                ? 'Videos inside stay in the library'
-                : 'Removes it from Telegram too — you confirm next',
+            label: 'Delete…',
+            sublabel: 'Removes it from Telegram too — you confirm next',
             icon: Trash2,
             onClick: doDelete,
             danger: true,
@@ -275,29 +290,19 @@ export default function GlobalContextMenu() {
 
                 {/* File Name & Visual Header */}
                 <div className="flex items-start gap-4 px-5 pt-5 min-[1600px]:px-8 min-[1600px]:pt-7">
-                    {file ? <SheetThumb file={file} /> : (
-                        <span className="flex h-20 w-32 shrink-0 items-center justify-center rounded-xl border border-[#2dd4bf]/25 bg-gradient-to-br from-[#2dd4bf]/15 to-[#0d9488]/5 min-[1600px]:h-28 min-[1600px]:w-44">
-                            <FolderIcon className="h-8 w-8 text-[#2dd4bf]" />
-                        </span>
-                    )}
+                    <SheetThumb file={file} />
                     <div className="min-w-0 flex-1">
                         <p className="ha-clamp2 text-base font-bold leading-snug text-[#e8f1ef] min-[1600px]:text-2xl">{title}</p>
                         <p className="mt-1 flex flex-wrap items-center gap-x-2 gap-y-1 text-xs text-[#9db6b1] min-[1600px]:text-base">
-                            {file ? (
-                                <>
-                                    <span className={`rounded-md px-1.5 py-0.5 font-mono font-bold ${
-                                        risky ? 'bg-[#fbbf24]/15 text-[#fbbf24]' : 'bg-[#2dd4bf]/15 text-[#5eead4]'
-                                    }`}>{containerOf(file)}</span>
-                                    <span>{formatFileSize(file.file_size)}</span>
-                                    {dur > 0 && <span className="font-mono">{fmtTime(dur)}</span>}
-                                    {watched && (
-                                        <span className="inline-flex items-center gap-1 font-semibold text-[#4ade80]">
-                                            <CheckCircle2 className="h-3.5 w-3.5" /> Watched
-                                        </span>
-                                    )}
-                                </>
-                            ) : (
-                                <span>{folder?.file_count ?? 0} {(folder?.file_count ?? 0) === 1 ? 'video' : 'videos'}</span>
+                            <span className={`rounded-md px-1.5 py-0.5 font-mono font-bold ${
+                                risky ? 'bg-[#fbbf24]/15 text-[#fbbf24]' : 'bg-[#2dd4bf]/15 text-[#5eead4]'
+                            }`}>{containerOf(file)}</span>
+                            <span>{formatFileSize(file.file_size)}</span>
+                            {dur > 0 && <span className="font-mono">{fmtTime(dur)}</span>}
+                            {watched && (
+                                <span className="inline-flex items-center gap-1 font-semibold text-[#4ade80]">
+                                    <CheckCircle2 className="h-3.5 w-3.5" /> Watched
+                                </span>
                             )}
                         </p>
                         {file && pct > 0 && !watched && (
