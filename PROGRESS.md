@@ -4,7 +4,7 @@
 
 * **Baseline Commit:** `5f0d769d7c8c143f27e419da90622505d153bcf0`
 * **Active Branch:** `hearth/production-hardening`
-* **Current Task:** `T7` — File Operations & Atomic Upserts
+* **Current Task:** `T8` — Web API Contracts & Store State
 * **Last Verified Commit:** `see git log (T2 merged at 07d2130; T3 on top)`
 
 ---
@@ -18,7 +18,7 @@
 * [x] **T4** — Telegram Client Safety (`telegram.py` in-place mutation & FloodWait retries)
 * [x] **T5** — Management Surface & Bot (`bot.py` callback auth gates, `/help`, `/users`, `/guest`, `/kick`)
 * [x] **T6** — Media Security & Headers (`routers/streaming.py`, `main.py`, strip `slowapi`)
-* [ ] **T7** — File Operations & Atomic Upserts (`routers/files.py` ON CONFLICT progress, batch-delete errors)
+* [x] **T7** — File Operations & Atomic Upserts (`routers/files.py` ON CONFLICT progress, batch-delete errors)
 * [ ] **T8** — Web API Contracts & Store State (`lib/api.ts`, `lib/store.ts`; preserve `MediaPlayer.tsx`)
 * [ ] **T9** — Frontend Keypad, Deep-Links & Cooldowns (`App.tsx` Family 8 / Guest 6, cooldown UI)
 * [ ] **T10** — File Browser & Confirmation Modals (`FileBrowser.tsx` Done/Esc/Tizen Back, `DeleteConfirmModal.tsx`)
@@ -56,5 +56,6 @@
 * `2026-11-18 | T4 | full pytest green (helper failure removal, clients[:] in-place identity, bounded FloodWait delete retry, started-only shutdown)`
 * `2026-11-18 | T5 | full pytest green (callback auth gate, user add/remove with token revocation, sessions/kick, guest status, paginated myfiles, family_members as single source of truth)`
 * `2026-11-18 | T6 | full pytest green (nosniff+CSP, safe disposition, family token version/membership checks, heartbeat ownership enforcement, cache bounds, slowapi removed)`
+* `2026-11-18 | T7 | full pytest green (atomic progress upsert, batch delete error reporting, guest delete protection, newest-first sorting, pagination)`
 
 **Note:** T0 Neon export + Telegram session backup are operator actions, still pending and REQUIRED before T2 schema changes.

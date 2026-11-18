@@ -43,12 +43,14 @@ from typing import Optional
 
 from fastapi import APIRouter, Body, Depends, HTTPException, Query, status
 from sqlalchemy import func, select
+from sqlalchemy.dialects.postgresql import insert as pg_insert
+from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
 from ..auth import get_current_user, require_admin
 from ..database import get_db
-from ..models import File, User, WatchProgress
+from ..models import File, User, WatchProgress, utcnow_naive
 from ..schemas import (
     BatchDeleteRequest,
     FileListResponse,
@@ -145,8 +147,8 @@ async def list_files(
     ),
     file_type: Optional[str] = Query(None, description="video | audio | document | image"),
     search: Optional[str] = Query(None, max_length=200, description="Filename contains"),
-    page: int = Query(1, ge=1),
-    per_page: int = Query(24, ge=1, le=100),
+    offset: int = Query(0, ge=0, description="Number of items to skip"),
+    limit: int = Query(24, ge=1, le=100, description="Max items per page"),
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ) -> FileListResponse:
@@ -178,16 +180,16 @@ async def list_files(
 
     query = (
         query.order_by(File.created_at.desc(), File.id.desc())
-        .offset((page - 1) * per_page)
-        .limit(per_page)
+        .offset(offset)
+        .limit(limit)
     )
     files = (await db.execute(query)).scalars().unique().all()
 
     return FileListResponse(
         files=[_file_payload(f, current_user.id) for f in files],
         total=int(total),
-        page=page,
-        per_page=per_page,
+        page=(offset // limit) + 1,
+        per_page=limit,
     )
 
 
@@ -240,47 +242,67 @@ async def update_progress(
 
     `completed` is NEVER taken from the client — it is derived from the 95 % rule
     so Continue Watching stays honest. Inputs are bounded by WatchProgressUpdate.
+
+    Atomic upsert via ON CONFLICT (PostgreSQL) or ON CONFLICT DO UPDATE (SQLite)
+    to eliminate the race where two concurrent requests both see no row and try to insert.
     """
     file = (await db.execute(select(File).where(File.id == file_id))).scalar_one_or_none()
     if file is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "File not found")
 
-    wp = (
-        await db.execute(
-            select(WatchProgress).where(
-                WatchProgress.file_id == file_id,
-                WatchProgress.user_id == current_user.id,
-            )
-        )
-    ).scalar_one_or_none()
-
     position = int(progress.position)
     duration = int(progress.duration) if progress.duration else None
 
-    if wp is None:
-        wp = WatchProgress(
-            user_id=current_user.id,
-            file_id=file_id,
-            position=position,
-            duration=duration,
-            completed=False,
+    known_duration = duration or 0
+    completed = bool(known_duration and position >= known_duration * COMPLETE_RATIO)
+
+    values = {
+        "user_id": current_user.id,
+        "file_id": file_id,
+        "position": position,
+        "duration": duration,
+        "completed": completed,
+        "updated_at": utcnow_naive(),
+    }
+
+    dialect_name = db.bind.dialect.name if db.bind else "postgresql"
+
+    if dialect_name == "sqlite":
+        stmt = (
+            sqlite_insert(WatchProgress)
+            .values(**values)
+            .on_conflict_do_update(
+                index_elements=["user_id", "file_id"],
+                set_={
+                    "position": position,
+                    "duration": duration,
+                    "completed": completed,
+                    "updated_at": utcnow_naive(),
+                },
+            )
         )
-        db.add(wp)
     else:
-        wp.position = position
-        if duration:
-            wp.duration = duration
+        stmt = (
+            pg_insert(WatchProgress)
+            .values(**values)
+            .on_conflict_do_update(
+                index_elements=["user_id", "file_id"],
+                set_={
+                    "position": position,
+                    "duration": duration,
+                    "completed": completed,
+                    "updated_at": utcnow_naive(),
+                },
+            )
+        )
 
-    known_duration = duration or (wp.duration or 0)
-    wp.completed = bool(known_duration and position >= known_duration * COMPLETE_RATIO)
-
+    await db.execute(stmt)
     await db.commit()
-    await db.refresh(wp)
 
     return WatchProgressOut(
-        position=wp.position,
-        duration=wp.duration or 0,
-        completed=wp.completed,
+        position=position,
+        duration=duration or 0,
+        completed=completed,
     )
 
 
@@ -375,8 +397,15 @@ async def batch_delete_files(
     admin: User = Depends(require_admin),
 ) -> dict[str, object]:
     """
-    Delete many files. Family only. All-or-nothing on the Telegram side:
-    if any chunk fails, NO database rows are removed and the caller gets 502.
+    Delete many files. Family only.
+
+    Processes files one by one (not in chunks) for honest per-file error reporting.
+    For each file:
+      - Attempt Telegram delete first
+      - If Telegram fails: retain DB row, add to failed_telegram list
+      - If Telegram succeeds but DB fails: add to failed_db list, log the error
+    Returns a structured response with 207 Multi-Status if any file failed.
+    Never returns 200 if any file failed.
     """
     ids = _normalise_ids(payload)
 
@@ -385,38 +414,75 @@ async def batch_delete_files(
     ).scalars().all()
 
     if not files:
-        return {"message": "No files found to delete", "deleted": 0}
+        return {
+            "deleted": [],
+            "failed_telegram": [],
+            "failed_db": [],
+            "message": "No files found to delete",
+        }
 
-    message_ids = [f.channel_message_id for f in files]
+    # Map file_id -> file for quick lookup
+    file_map = {f.id: f for f in files}
 
-    if not await _confirm_telegram_delete(message_ids):
-        raise HTTPException(
-            status.HTTP_502_BAD_GATEWAY,
-            detail={
-                "code": "TELEGRAM_DELETE_FAILED",
-                "message": "Could not delete every file from Telegram. Nothing was removed; please retry.",
-            },
-        )
+    deleted: list[int] = []
+    failed_telegram: list[int] = []
+    failed_db: list[int] = []
 
-    try:
-        for file in files:
+    for file_id in ids:
+        file = file_map.get(file_id)
+        if file is None:
+            # File not found in DB — treat as failed_db for reporting
+            failed_db.append(file_id)
+            continue
+
+        message_id = file.channel_message_id
+
+        # Step 1: Telegram delete
+        if not await _confirm_telegram_delete([message_id]):
+            failed_telegram.append(file_id)
+            logger.warning(
+                "Batch delete: Telegram delete failed for file_id=%s; DB row preserved",
+                file_id,
+            )
+            continue
+
+        # Step 2: DB delete
+        try:
             await db.delete(file)
-        await db.commit()
-    except Exception:  # noqa: BLE001
-        logger.exception(
-            "DB batch delete failed AFTER Telegram delete (ids=%s); dead rows will be reconciled by /sync",
-            ids,
-        )
-        raise HTTPException(
-            status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail={
-                "code": "DB_DELETE_FAILED",
-                "message": "Removed from Telegram but the catalog update failed. Run /sync to clean up.",
-            },
-        ) from None
+            await db.commit()
+        except Exception:  # noqa: BLE001
+            await db.rollback()
+            failed_db.append(file_id)
+            logger.exception(
+                "Batch delete: DB delete failed AFTER Telegram delete (file=%s message=%s); "
+                "row is now dead and will be reconciled by /sync",
+                file_id,
+                message_id,
+            )
+            continue
 
-    for file in files:
-        invalidate_meta(file.id, file.channel_message_id)
+        # Step 3: Cache invalidation
+        invalidate_meta(file_id, message_id)
+        deleted.append(file_id)
 
-    logger.info("Batch delete by admin %s: %d file(s)", admin.id, len(files))
-    return {"message": f"Deleted {len(files)} files", "deleted": len(files)}
+    logger.info(
+        "Batch delete by admin %s: deleted=%d failed_telegram=%d failed_db=%d",
+        admin.id,
+        len(deleted),
+        len(failed_telegram),
+        len(failed_db),
+    )
+
+    any_failed = bool(failed_telegram or failed_db)
+    status_code = status.HTTP_207_MULTI_STATUS if any_failed else status.HTTP_200_OK
+
+    return {
+        "deleted": deleted,
+        "failed_telegram": failed_telegram,
+        "failed_db": failed_db,
+        "message": (
+            f"Deleted {len(deleted)} file(s)"
+            + (f", {len(failed_telegram)} Telegram failure(s)" if failed_telegram else "")
+            + (f", {len(failed_db)} DB failure(s)" if failed_db else "")
+        ),
+    }, status_code
