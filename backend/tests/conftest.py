@@ -10,3 +10,5 @@ os.environ.setdefault("TELEGRAM_STORAGE_CHANNEL_ID", "-1001234567890")
 os.environ.setdefault("DATABASE_URL", "sqlite:///./data/test.db")
 os.environ.setdefault("JWT_SECRET", "unit-test-secret-" + "x" * 40)
 os.environ.setdefault("AUTH_USERS", "123456789")
+# TEST-ONLY: config.py rejects sqlite DATABASE_URL unless this is set.
+os.environ.setdefault("HEARTH_ALLOW_SQLITE", "1")

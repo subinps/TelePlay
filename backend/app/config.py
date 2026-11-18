@@ -87,6 +87,10 @@ class Settings(BaseSettings):
     # ── Database (required) ──────────────────────────────────────────────────
     database_url: str = Field(min_length=8)
 
+    # TEST-ONLY escape hatch: offline pytest sets HEARTH_ALLOW_SQLITE=1 so the
+    # suite can run on sqlite. Production NEVER sets it — sqlite is rejected.
+    hearth_allow_sqlite: bool = Field(default=False, alias="HEARTH_ALLOW_SQLITE")
+
     # ── JWT / sessions ───────────────────────────────────────────────────────
     jwt_secret: str
     jwt_expiry_minutes: int = Field(default=10080, ge=5, le=43200)   # 7 days
@@ -248,6 +252,19 @@ class Settings(BaseSettings):
         if self.web_link_code_ttl_minutes > self.login_code_ttl_minutes:
             raise ValueError(
                 "WEB_LINK_CODE_TTL_MINUTES should not exceed LOGIN_CODE_TTL_MINUTES"
+            )
+        db = (self.database_url or "").strip().lower()
+        if db.startswith("sqlite"):
+            if not self.hearth_allow_sqlite:
+                raise ValueError(
+                    "DATABASE_URL points at SQLite, which Hearth does not support "
+                    "in production (Neon PostgreSQL only). Use a postgresql:// URL, "
+                    "or set HEARTH_ALLOW_SQLITE=1 for the offline test suite ONLY."
+                )
+        elif not db.startswith("postgresql"):
+            raise ValueError(
+                f"DATABASE_URL must start with postgresql:// (got driver "
+                f"{db.split(':', 1)[0]!r}). Hearth runs on Neon PostgreSQL only."
             )
         return self
 

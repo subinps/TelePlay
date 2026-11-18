@@ -126,6 +126,7 @@ async def get_or_create_user(
                 username=username,
                 first_name=first_name,
                 last_name=last_name,
+                role="admin" if telegram_id in settings.auth_users else "guest",
             )
             db.add(user)
             await db.commit()
