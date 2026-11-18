@@ -192,7 +192,7 @@ class Settings(BaseSettings):
     def _database_url_sane(cls, v: str) -> str:
         v = (v or "").strip()
         if not v:
-            raise ValueError("DATABASE_URL is required (Neon PostgreSQL URL, or sqlite:///./data/teleplay.db)")
+            raise ValueError("DATABASE_URL is required (Neon PostgreSQL URL: postgresql+asyncpg://...)")
         return v
 
     @field_validator("web_base_url")

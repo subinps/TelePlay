@@ -66,6 +66,10 @@ class PlaybackSession:
     owner_id: Optional[int] = None  # User.id of the account that started it
     last_seen: float = field(default_factory=time.monotonic)
     started_at: float = field(default_factory=time.monotonic)
+    # Wall-clock token generation accepted when this session was created.
+    # Compared against per-device revocation floors on heartbeat so a fresh
+    # post-kick session is never killed by the floor it was born under.
+    issued_at: float = 0.0
 
 
 class PlaybackLimiter:
@@ -125,7 +129,12 @@ class PlaybackLimiter:
 
     def kick(self, device_id: str) -> None:
         """Admin revocation: free the slot AND kill every already-issued token."""
-        self._revoked_before[device_id] = time.time()
+        # Floor at INTEGER-second granularity on purpose: auth.py mints token
+        # `iat` with int(time.time()). A float floor would falsely revoke a
+        # token minted in the same second as the kick, breaking "kick then
+        # immediately replay". Trade-off: a token minted in that same whole
+        # second survives for at most the remainder of that second.
+        self._revoked_before[device_id] = float(int(time.time()))
         self._sessions.pop(device_id, None)
         self._prune_revocations()
         logger.info("Playback device kicked and revoked: %s", device_id)
@@ -189,6 +198,17 @@ class PlaybackLimiter:
         if device_id not in self._sessions and len(self._sessions) >= self.max_devices:
             return False, list(self._sessions.values())
 
+        # Accepted wall-clock token generation for this session. Never
+        # downgrade an existing session's generation when re-starting.
+        if reactivate:
+            # Authenticated start: a NEW token is minted right after, whose
+            # iat >= this integer-second generation.
+            generation = float(int(time.time()))
+        elif issued_at is not None:
+            generation = float(issued_at)
+        else:
+            generation = float(int(time.time()))
+
         now = self.clock()
         existing = self._sessions.get(device_id)
         self._sessions[device_id] = PlaybackSession(
@@ -199,6 +219,9 @@ class PlaybackLimiter:
             owner_id=owner_id if owner_id is not None else (existing.owner_id if existing else None),
             last_seen=now,
             started_at=existing.started_at if existing else now,
+            issued_at=(
+                max(existing.issued_at, generation) if existing else generation
+            ),
         )
         return True, list(self._sessions.values())
 
@@ -208,12 +231,18 @@ class PlaybackLimiter:
         file_id: int | None = None,
         *,
         owner_id: int | None = None,
+        issued_at: float | None = None,
     ) -> bool:
         """
         Keep a session alive. False => expired, kicked or not yours.
 
         owner_id=None keeps backwards compatibility with older callers; the
         playback router (chat #7) always passes it.
+
+        issued_at: the token's wall-clock generation. Defaults to the
+        generation accepted when this session started, so a session that was
+        legitimately (re)created AFTER a kick is never killed by that kick's
+        floor. T6 will pass the live stream token's iat here later.
         """
         self._purge()
         session = self._sessions.get(device_id)
@@ -222,7 +251,8 @@ class PlaybackLimiter:
         if owner_id is not None and session.owner_id != owner_id:
             logger.warning("Heartbeat owner mismatch for device %s", device_id)
             return False
-        if self.is_revoked(device_id):
+        effective = issued_at if issued_at is not None else session.issued_at
+        if self.is_revoked(device_id, effective):
             self._sessions.pop(device_id, None)
             return False
         session.last_seen = self.clock()
@@ -249,6 +279,18 @@ class PlaybackLimiter:
     def stop_role(self, role: str) -> None:
         """Drop every session of a role (guest PIN rotated / disabled)."""
         for key in [k for k, s in self._sessions.items() if s.role == role]:
+            del self._sessions[key]
+
+    def stop_owner(self, owner_id: int) -> None:
+        """
+        Drop every session belonging to one account (logout-all).
+
+        Does NOT revoke: no floor is set, so the account's devices may start
+        again freely once they obtain fresh tokens. All guests share one
+        User.id, so stop_owner(guest_id) ends every guest session — that is
+        the intended shared-guest design.
+        """
+        for key in [k for k, s in self._sessions.items() if s.owner_id == owner_id]:
             del self._sessions[key]
 
     # ── diagnostics ─────────────────────────────────────────────────────────

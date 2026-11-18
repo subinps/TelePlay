@@ -333,16 +333,14 @@ async def logout(
 
     Releases this device's playback slot and lets the client discard its tokens.
     Deliberately does not touch auth_version, so the TV keeps playing.
+
+    Ownership is enforced by owner_id (not role): limiter.stop() refuses when
+    the session belongs to another account and leaves it intact. The response
+    is ALWAYS 204 — we never leak whether a session existed.
     """
     device_id = _device_header(request)
     if device_id:
-        caller_role = current_user.role or "guest"
-        # Interim ownership guard: never let a guest release a family session.
-        # Full owner binding lands with the playback limiter rewrite.
-        for session in limiter.active():
-            if session.device_id == device_id and session.role == caller_role:
-                limiter.stop(device_id)
-                break
+        limiter.stop(device_id, owner_id=current_user.id)
     return Response(status_code=status.HTTP_204_NO_CONTENT)
 
 
@@ -351,11 +349,19 @@ async def logout_all(
     current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ) -> dict[str, str]:
-    """Sign out EVERY device for this account (invalidates all issued tokens)."""
+    """Sign out EVERY device for this account (invalidates all issued tokens).
+
+    Note: "Already-issued family STREAM URLs are revoked in T6 (family
+    ver/membership check on the media path); this endpoint currently
+    invalidates API tokens and stops this account's playback sessions."
+
+    All guests share one User.id, so stop_owner ends all guest sessions —
+    that matches the intended shared-guest design.
+    """
     current_user.auth_version = int(current_user.auth_version or 0) + 1
     db.add(current_user)
     await db.commit()
 
-    limiter.stop_role(current_user.role or "guest")
+    limiter.stop_owner(current_user.id)
     logger.info("logout-all: invalidated every session for user %s", current_user.id)
     return {"message": "All sessions have been invalidated"}
