@@ -1,34 +1,21 @@
 /**
-Hearth — API layer  (README §4.6, §6.3, §6.4, §6.8, §7.2; fixes F7, F9, F10, F11, F16)
-─────────────────────────────────────────────────────────────────────────────
-KEPT (working logic)
-axios instance + bearer header + single-flight refresh, React Query hooks,
-every legacy export the existing screens import (useFiles, useFolders, useFolderTree,
-useRecentFiles, useContinueWatching, useCreateFolder, useUpdateFile, useUpdateFolder,
-useDeleteFile(s), useDeleteFolder(s), useMoveFiles, useMoveFolders, useFile,
-useUpdateProgress, formatDuration, formatFileSize, TelegramFile, Folder, api).
-
-FIXED
-F16  every path resolves against the API origin (apiUrl / API_ORIGIN) — never the
-   Pages origin, so thumbnails and streams stop 404ing on a split deployment.
-F7   playback uses POST /playback/start → a short, per-file, per-device signed URL.
-   No 7-day login JWT is ever placed in a media URL.
-F10  thumbnails are fetched with the Authorization header and turned into blob URLs
-   (LRU-cached, revoked on eviction) instead of leaking a token into <img src>.
-F9   progress writes patch the query cache in place (no 10 s refetch storm) and let the
-   server own the `completed` flag at 95 %.
-F11  guests get clean 403s surfaced as readable messages, never silent failures.
-
-ADDED
-playback session hooks (start / heartbeat / stop / active / kick) with the 409
-DEVICE_LIMIT payload typed, /auth/me role, /auth/bot-info, typed query-key factory,
-readable error extraction, and route-drift tolerance during the phased rollout.
-
-COMPATIBILITY
-Mutation results expose `isPending` AND `isLoading` so screens written against either
-React Query v4 or v5 behave identically. No v4/v5-only options are used.
-─────────────────────────────────────────────────────────────────────────────
-*/
+ * Hearth — API layer (T8)
+ * ─────────────────────────────────────────────────────────────────────────────
+ * Flat-library only. Every folder / move / rename endpoint is gone.
+ *
+ * Contracts that MUST stay stable for the frozen MediaPlayer.tsx:
+ *   TelegramFile, formatDuration, useUpdateProgress, useFile, api
+ * `api` remains an axios instance (MediaPlayer calls api.post / api.get directly
+ * and reads api.defaults.baseURL), so it is not replaced by a plain object.
+ *
+ * Security:
+ *   · logout() signs out THIS device only (POST /auth/logout).
+ *   · fetchMe()/useMe() fail closed: any failure → null user, role "unknown".
+ *   · 429 → { error: "RATE_LIMITED", retry_after_seconds } (server value).
+ *   · 409 on playback/start → { error: "DEVICE_LIMIT", message, active }.
+ *   · Stream URLs carry a signed per-file/per-device token; login JWTs never do.
+ * ─────────────────────────────────────────────────────────────────────────────
+ */
 import axios from "axios";
 import type { AxiosError, AxiosRequestConfig } from "axios";
 import {
@@ -47,11 +34,27 @@ const ENV =
   (import.meta as unknown as { env?: Record<string, string | undefined> })
     .env ?? {};
 
+const RAW_BASE = (
+  ENV.VITE_API_URL ||
+  ENV.VITE_API_BASE_URL ||
+  "/api"
+).trim();
+
+function normaliseBase(raw: string): string {
+  if (!raw) return "/api";
+  const trimmed = raw.replace(/\/+$/, "");
+  if (/^https?:\/\//i.test(trimmed)) {
+    const url = new URL(trimmed);
+    if (!url.pathname || url.pathname === "/") return `${url.origin}/api`;
+    return trimmed;
+  }
+  return trimmed === "/api" || trimmed.endsWith("/api")
+    ? trimmed
+    : `${trimmed}/api`;
+}
+
 /** '/api' for same-origin deploys, or an absolute 'https://host/api' for split deploys. */
-export const API_BASE: string = (ENV.VITE_API_URL || "/api").replace(
-  /\/+$/,
-  "",
-);
+export const API_BASE: string = normaliseBase(RAW_BASE);
 
 export const API_ORIGIN: string = /^https?:\/\//i.test(API_BASE)
   ? new URL(API_BASE).origin
@@ -59,7 +62,6 @@ export const API_ORIGIN: string = /^https?:\/\//i.test(API_BASE)
     ? window.location.origin
     : "";
 
-/** F16: resolve an API path against the API origin, never the page origin. */
 export function apiUrl(path: string): string {
   if (!path) return API_ORIGIN;
   if (/^https?:\/\//i.test(path)) return path;
@@ -67,13 +69,150 @@ export function apiUrl(path: string): string {
   return API_ORIGIN ? `${API_ORIGIN}${clean}` : clean;
 }
 
-/** Backend returns paths that already include /api — never double the prefix. */
-export function resolveBackendPath(path: string): string {
+function resolveBackendPath(path?: string | null): string | undefined {
+  if (!path) return undefined;
   if (/^https?:\/\//i.test(path)) return path;
   if (path.startsWith("/api/") || path === "/api") return apiUrl(path);
-  const base = API_BASE.endsWith("/api") ? API_BASE : `${API_BASE}/api`;
-  return apiUrl(`${base}${path.startsWith("/") ? path : `/${path}`}`);
+  return apiUrl(`${API_BASE}${path.startsWith("/") ? path : `/${path}`}`);
 }
+
+/* ═══════════════════════════════ Types ═══════════════════════════════ */
+
+export type UserRole = "admin" | "guest";
+export type Role = UserRole | "unknown";
+export type FileKind = "video" | "audio" | "image" | "document" | string;
+
+export interface SubtitleTrack {
+  lang: string;
+  label: string;
+  url: string;
+}
+
+export interface TelegramFile {
+  id: number;
+  file_name: string;
+  file_type: FileKind;
+  file_size: number;
+  mime_type?: string | null;
+  duration?: number | null;
+  width?: number | null;
+  height?: number | null;
+  thumbnail_url?: string | null;
+  /** @deprecated Backend no longer sends this; the player uses /playback/start. */
+  stream_url?: string;
+  folder_id?: number | null;
+  message_id?: number | null;
+  created_at?: string;
+  updated_at?: string;
+  last_pos?: number | null;
+  completed?: boolean;
+  subtitles?: SubtitleTrack[];
+}
+
+/** @deprecated Kept only so unretired screens still type-check during rollout. */
+export interface Folder {
+  id: number;
+  name: string;
+  parent_id?: number | null;
+  file_count?: number;
+  created_at?: string;
+}
+
+export interface FilesPage {
+  files: TelegramFile[];
+  total: number;
+  page: number;
+  per_page: number;
+}
+
+export interface User {
+  id?: number;
+  telegram_id?: number;
+  username?: string | null;
+  first_name?: string | null;
+  last_name?: string | null;
+  role: UserRole;
+  created_at?: string;
+  last_active?: string;
+}
+
+/** Alias retained for existing imports. */
+export type Me = User;
+
+export interface BotInfo {
+  bot_username: string;
+  bot_link: string;
+}
+
+export interface ActiveDevice {
+  device_id: string;
+  label: string;
+  file_id?: number | null;
+  role?: UserRole | string;
+  is_self?: boolean;
+  started_at?: string;
+  last_seen?: string;
+}
+
+export interface PlaybackStartSuccess {
+  token: string;
+  device_id: string;
+  stream_url?: string;
+  heartbeat_seconds: number;
+  expires_in?: number;
+}
+
+export interface DeviceLimitError {
+  error: "DEVICE_LIMIT";
+  message: string;
+  active: ActiveDevice[];
+}
+
+export type PlaybackStartResult = PlaybackStartSuccess | DeviceLimitError;
+
+export interface RateLimited {
+  error: "RATE_LIMITED";
+  retry_after_seconds: number;
+}
+
+export interface AuthFailure {
+  error: "AUTH_FAILED" | "NETWORK";
+  message: string;
+}
+
+export interface AuthSuccess {
+  access_token: string;
+  refresh_token?: string | null;
+  token_type?: string;
+  user: User;
+}
+
+export type AuthResult = AuthSuccess | RateLimited | AuthFailure;
+
+export interface TokenPair {
+  access_token: string;
+  refresh_token?: string | null;
+  token_type?: string;
+}
+
+export interface ProgressPayload {
+  fileId: number;
+  position: number;
+  duration?: number;
+}
+
+export interface ProgressResult {
+  position: number;
+  duration: number;
+  completed: boolean;
+}
+
+export const isAuthSuccess = (r: AuthResult): r is AuthSuccess =>
+  typeof (r as AuthSuccess).access_token === "string" &&
+  (r as AuthSuccess).access_token.length > 0;
+
+export const isDeviceLimit = (r: PlaybackStartResult): r is DeviceLimitError =>
+  (r as DeviceLimitError).error === "DEVICE_LIMIT";
 
 /* ═══════════════════════════════ Tokens ═══════════════════════════════ */
 
@@ -104,19 +243,17 @@ const drop = (k: string) => {
   }
 };
 
-export const getAccessToken = () => read(ACCESS_KEY);
-export const getRefreshToken = () => read(REFRESH_KEY);
-export const isAuthenticated = () => !!getAccessToken();
-
-export interface TokenPair {
-  access_token: string;
-  refresh_token?: string;
-  token_type?: string;
-}
+export const getAccessToken = (): string | null => read(ACCESS_KEY);
+export const getRefreshToken = (): string | null => read(REFRESH_KEY);
+export const isAuthenticated = (): boolean => !!getAccessToken();
 
 export function setTokens(tokens: TokenPair): void {
   if (tokens?.access_token) write(ACCESS_KEY, tokens.access_token);
-  if (tokens?.refresh_token) write(REFRESH_KEY, tokens.refresh_token);
+  if (tokens?.refresh_token) {
+    write(REFRESH_KEY, tokens.refresh_token);
+  } else if ("refresh_token" in tokens) {
+    drop(REFRESH_KEY);
+  }
 }
 
 export function clearTokens(): void {
@@ -133,94 +270,6 @@ function emit(name: string, detail?: unknown) {
   } catch {
     /* noop */
   }
-}
-
-/* ═══════════════════════════════ Types ═══════════════════════════════ */
-
-export type UserRole = "admin" | "guest";
-export type FileKind = "video" | "audio" | "image" | "document" | string;
-
-export interface SubtitleTrack {
-  lang: string;
-  label: string;
-  url: string;
-}
-
-export interface TelegramFile {
-  id: number;
-  file_name: string;
-  file_type: FileKind;
-  file_size: number;
-  mime_type?: string | null;
-  duration?: number | null;
-  width?: number | null;
-  height?: number | null;
-  thumbnail_url?: string | null;
-  stream_url?: string; // Backend no longer sends this; player uses /playback/start
-  folder_id?: number | null;
-  message_id?: number | null;
-  created_at?: string;
-  updated_at?: string;
-  /** Per-user progress (§6.4). */
-  last_pos?: number | null;
-  completed?: boolean;
-  subtitles?: SubtitleTrack[];
-}
-
-export interface Folder {
-  id: number;
-  name: string;
-  parent_id?: number | null;
-  file_count: number;
-  created_at?: string;
-  children?: Folder[];
-}
-
-export interface FilesPage {
-  files: TelegramFile[];
-  total: number;
-  page: number;
-  per_page: number;
-}
-
-export interface Me {
-  telegram_id?: number;
-  username?: string | null;
-  first_name?: string | null;
-  role: UserRole;
-}
-
-export interface BotInfo {
-  bot_username: string;
-  bot_link: string;
-}
-
-export interface ActiveDevice {
-  device_id: string;
-  label: string;
-  file_id?: number | null;
-  role?: UserRole | string;
-  started_at?: string;
-  last_seen?: string;
-}
-
-export interface PlaybackStart {
-  stream_url?: string; // Backend no longer sends this; player uses /playback/start
-  token?: string;
-  heartbeat_seconds: number;
-  expires_in?: number;
-}
-
-export interface DeviceLimitDetail {
-  code: "DEVICE_LIMIT";
-  message?: string;
-  active: ActiveDevice[];
-}
-
-export interface ProgressPayload {
-  fileId: number;
-  position: number;
-  duration?: number;
 }
 
 /* ═══════════════════════════════ Errors ═══════════════════════════════ */
@@ -256,12 +305,10 @@ export function errorMessage(
   if (s === 429) return "Too many attempts. Wait a moment and try again.";
   if (s && s >= 500)
     return "The server had a problem. Nothing was changed — try again.";
-  if (!s)
-    return "Could not reach the server. Check the connection and try again.";
+  if (!s) return "Could not reach the server. Check the connection and try again.";
   return fallback;
 }
 
-/** True when the backend refused because two screens are already playing. */
 export function isDeviceLimitError(e: unknown): boolean {
   const d = errorDetail(e);
   return (
@@ -272,35 +319,17 @@ export function isDeviceLimitError(e: unknown): boolean {
   );
 }
 
-export function deviceLimitPayload(e: unknown): DeviceLimitDetail | null {
-  if (!isDeviceLimitError(e)) return null;
-  const d = errorDetail(e) as DeviceLimitDetail;
-  return {
-    code: "DEVICE_LIMIT",
-    message: d.message,
-    active: Array.isArray(d.active) ? d.active : [],
-  };
-}
-
-/** Route missing (not deployed yet) vs. a real 404 for a record. */
-function routeMissing(e: unknown): boolean {
-  const s = errorStatus(e);
-  if (s === 405 || s === 501) return true;
-  if (s !== 404) return false;
+export function retryAfterSeconds(e: unknown): number {
   const d = errorDetail(e);
-  return typeof d !== "string" || d === "Not Found" || d === "Not found";
-}
-
-async function withRouteFallback<T>(
-  primary: () => Promise<T>,
-  fallback: () => Promise<T>,
-): Promise<T> {
-  try {
-    return await primary();
-  } catch (e) {
-    if (routeMissing(e)) return fallback();
-    throw e;
+  if (d && typeof d === "object") {
+    const n = Number((d as { retry_after_seconds?: unknown }).retry_after_seconds);
+    if (Number.isFinite(n) && n > 0) return Math.ceil(n);
   }
+  const headers = (e as { response?: { headers?: Record<string, unknown> } })
+    ?.response?.headers;
+  const raw = headers?.["retry-after"] ?? headers?.["Retry-After"];
+  const n = Number(raw);
+  return Number.isFinite(n) && n > 0 ? Math.ceil(n) : 0;
 }
 
 /* ═══════════════════════════════ axios instance ═══════════════════════════════ */
@@ -324,10 +353,6 @@ const AUTH_ROUTES = [
   "/auth/verify-code",
   "/auth/refresh",
   "/auth/guest/login",
-  "/auth/logout-all",
-  "/auth/login",
-  "/auth/guest-login",
-  "/auth/guest",
   "/auth/logout",
 ];
 
@@ -340,7 +365,6 @@ async function refreshAccessToken(): Promise<string> {
   const refresh = getRefreshToken();
   if (!refresh) throw new Error("no refresh token");
 
-  // Plain axios: bypasses our interceptors so a 401 here cannot recurse.
   const { data } = await axios.post<TokenPair>(
     apiUrl(`${API_BASE}/auth/refresh`),
     { refresh_token: refresh },
@@ -393,31 +417,22 @@ api.interceptors.response.use(
   },
 );
 
-/* ═══════════════════════════════ Query keys ═══════════════════════════════ */
+/* ═══════════════════════════════ Query keys & client ═══════════════════════════════ */
 
 export const qk = {
   files: (
-    folderId: number | null,
+    _folderId: number | null,
     fileType?: string,
     search?: string,
     page = 1,
     perPage = 24,
   ) =>
-    [
-      "files",
-      folderId ?? "root",
-      fileType ?? "all",
-      search ?? "",
-      page,
-      perPage,
-    ] as const,
+    ["files", "all", fileType ?? "all", search ?? "", page, perPage] as const,
   filesAll: () => ["files"] as const,
   file: (id: number) => ["file", id] as const,
   continue: (limit: number) => ["continue-watching", limit] as const,
   continueAll: () => ["continue-watching"] as const,
   recent: (limit: number) => ["recent", limit] as const,
-  folders: () => ["folders"] as const,
-  folderTree: () => ["folder-tree"] as const,
   me: () => ["me"] as const,
   botInfo: () => ["bot/info"] as const,
   activeDevices: () => ["playback", "active"] as const,
@@ -428,7 +443,7 @@ export const queryClient = new QueryClient({
     queries: {
       staleTime: 30_000,
       retry: 1,
-      refetchOnWindowFocus: false, // TV: never refetch on remote-driven focus
+      refetchOnWindowFocus: false,
       refetchOnReconnect: true,
     },
     mutations: { retry: 0 },
@@ -443,11 +458,7 @@ function asArray<T>(value: unknown, key: string): T[] {
   return Array.isArray(inner) ? (inner as T[]) : [];
 }
 
-function normalisePage(
-  data: unknown,
-  page: number,
-  perPage: number,
-): FilesPage {
+function normalisePage(data: unknown, page: number, perPage: number): FilesPage {
   if (Array.isArray(data)) {
     const files = data as TelegramFile[];
     return {
@@ -470,22 +481,17 @@ function normalisePage(
   };
 }
 
-function normaliseRole(value: unknown): UserRole {
-  const r = (value as { role?: string; user?: { role?: string } } | null)?.role
-    ?? (value as { user?: { role?: string } } | null)?.user?.role;
-  // Fail closed: default to least privilege (guest) until explicitly confirmed as admin
-  return r === "admin" ? "admin" : "guest";
+function normaliseRole(value: unknown): Role {
+  const r = (value as { role?: unknown } | null)?.role;
+  return r === "admin" || r === "guest" ? r : "unknown";
 }
 
-function normaliseMe(data: unknown): Me {
-  const d = (data ?? {}) as Me & { user?: Me };
-  const src = d.user ?? d;
-  return {
-    telegram_id: src.telegram_id,
-    username: src.username ?? null,
-    first_name: src.first_name ?? null,
-    role: normaliseRole(data),
-  };
+function normaliseUser(data: unknown): User | null {
+  const d = (data ?? {}) as { user?: User } & User;
+  const src = (d.user ?? d) as User;
+  const role = normaliseRole(src);
+  if (role === "unknown") return null;
+  return { ...src, role };
 }
 
 function normaliseBotInfo(data: unknown): BotInfo {
@@ -502,37 +508,65 @@ function normaliseBotInfo(data: unknown): BotInfo {
 }
 
 function normaliseDevices(data: unknown): ActiveDevice[] {
-  const list = asArray<ActiveDevice>(data, "active");
-  return list.filter((d) => !!d && typeof d.device_id === "string");
+  return asArray<ActiveDevice>(data, "active").filter(
+    (d) => !!d && typeof d.device_id === "string",
+  );
 }
 
 /* ═══════════════════════════════ Auth API ═══════════════════════════════ */
 
-export async function loginWithCode(code: string): Promise<TokenPair> {
-  // Backend route is /auth/verify-code
-  const { data } = await api.post<TokenPair>("/auth/verify-code", {
-    code: code.trim(),
-  });
-  setTokens(data);
-  emit(AUTH_CHANGED_EVENT, { authenticated: true });
-  return data;
+function authFailure(e: unknown): AuthResult {
+  if (errorStatus(e) === 429) {
+    return { error: "RATE_LIMITED", retry_after_seconds: retryAfterSeconds(e) };
+  }
+  return {
+    error: errorStatus(e) ? "AUTH_FAILED" : "NETWORK",
+    message: errorMessage(e, "Could not sign in. Check the code and try again."),
+  };
 }
 
-export async function loginWithPin(pin: string): Promise<TokenPair> {
-  // Backend route is /auth/guest/login
-  const body = { pin: pin.trim() };
-  const { data } = await api.post<TokenPair>("/auth/guest/login", body);
-  setTokens(data);
-  emit(AUTH_CHANGED_EVENT, { authenticated: true });
-  return data;
+async function loginRequest(
+  path: string,
+  body: Record<string, string>,
+): Promise<AuthResult> {
+  try {
+    const { data } = await api.post<AuthSuccess>(path, body);
+    if (!isAuthSuccess(data)) {
+      return { error: "AUTH_FAILED", message: "The server did not return a session." };
+    }
+    setTokens(data);
+    emit(AUTH_CHANGED_EVENT, { authenticated: true });
+    return data;
+  } catch (e) {
+    return authFailure(e);
+  }
+}
+
+/** Family sign-in: POST /auth/verify-code with an 8-digit code. */
+export function loginWithCode(code: string): Promise<AuthResult> {
+  return loginRequest("/auth/verify-code", { code: code.trim() });
+}
+
+/** Guest sign-in: POST /auth/guest/login with a 6-digit PIN. */
+export function loginWithPin(pin: string): Promise<AuthResult> {
+  return loginRequest("/auth/guest/login", { pin: pin.trim() });
 }
 
 export const login = loginWithCode;
 export const guestLogin = loginWithPin;
 
-export async function fetchMe(): Promise<Me> {
-  const { data } = await api.get("/auth/me");
-  return normaliseMe(data);
+/**
+ * GET /auth/me — FAIL CLOSED.
+ * A 401, timeout, network error or an unrecognised role returns null.
+ * It must never be possible for a failed lookup to grant admin.
+ */
+export async function fetchMe(): Promise<User | null> {
+  try {
+    const { data } = await api.get("/auth/me");
+    return normaliseUser(data);
+  } catch {
+    return null;
+  }
 }
 
 export async function fetchBotInfo(): Promise<BotInfo> {
@@ -544,37 +578,85 @@ export async function fetchBotInfo(): Promise<BotInfo> {
   }
 }
 
-/** Revokes the refresh token, releases this screen's playback slot, clears local tokens. */
+/**
+ * Sign out THIS device only.
+ * Hits /auth/logout (never /auth/logout-all), stops this screen's playback slot,
+ * and clears every auth artifact locally. The stable device id is intentionally
+ * kept so this physical screen keeps the same identity on the next sign-in.
+ * Returns void; the caller decides where to navigate.
+ */
 export async function logout(): Promise<void> {
-  // Backend route is /auth/logout-all (takes empty body, relies on Bearer token)
   try {
-    await api.post("/auth/logout-all", {});
+    await api.post("/auth/logout", {});
   } catch {
-    /* best effort */
+    /* best effort: local sign-out must still happen */
   }
   stopPlaybackBeacon();
   clearTokens();
   emit(AUTH_CHANGED_EVENT, { authenticated: false });
 }
 
-/* ═══════════════════════════════ Playback (§4.6 / §6.3) ═══════════════════════════════ */
+/* ═══════════════════════════════ Playback ═══════════════════════════════ */
 
-export async function startPlayback(fileId: number): Promise<PlaybackStart> {
-  const { data } = await api.post<PlaybackStart>("/playback/start", {
-    file_id: fileId,
-    device_id: getDeviceId(),
-    device_label: getDeviceLabel(),
-  });
+/** Signed per-file/per-device stream URL. Never contains a login JWT. */
+export function streamFile(fileId: number, token: string): string {
+  return `${API_ORIGIN || ""}/api/stream/${fileId}?t=${encodeURIComponent(token)}`;
+}
 
-  return {
-    stream_url: resolveBackendPath(data.stream_url),
-    token: data.token,
-    heartbeat_seconds: Math.min(
-      60,
-      Math.max(5, Number(data.heartbeat_seconds) || 20),
-    ),
-    expires_in: data.expires_in,
-  };
+function tokenFromStreamUrl(url?: string): string {
+  if (!url) return "";
+  const m = /[?&]t=([^&]+)/.exec(url);
+  return m ? decodeURIComponent(m[1]) : "";
+}
+
+/**
+ * POST /playback/start.
+ * Success → signed stream token; 409 → typed DEVICE_LIMIT for the popup.
+ */
+export async function startPlayback(
+  fileId: number,
+  label?: string,
+): Promise<PlaybackStartResult> {
+  const deviceId = getDeviceId();
+  try {
+    const { data } = await api.post<{
+      stream_url?: string;
+      token?: string;
+      heartbeat_seconds?: number;
+      expires_in?: number;
+    }>("/playback/start", {
+      file_id: fileId,
+      device_id: deviceId,
+      device_label: label || getDeviceLabel(),
+    });
+
+    const token = data.token || tokenFromStreamUrl(data.stream_url);
+    return {
+      token,
+      device_id: deviceId,
+      stream_url: resolveBackendPath(data.stream_url),
+      heartbeat_seconds: Math.min(
+        60,
+        Math.max(5, Number(data.heartbeat_seconds) || 20),
+      ),
+      expires_in: data.expires_in,
+    };
+  } catch (e) {
+    if (isDeviceLimitError(e)) {
+      const d = errorDetail(e) as {
+        message?: string;
+        active?: ActiveDevice[];
+      };
+      return {
+        error: "DEVICE_LIMIT",
+        message:
+          d?.message ||
+          "Two screens are already playing. Stop one to start here.",
+        active: Array.isArray(d?.active) ? d.active : [],
+      };
+    }
+    throw e;
+  }
 }
 
 export async function sendHeartbeat(fileId?: number): Promise<void> {
@@ -590,7 +672,6 @@ export async function stopPlayback(
   await api.post("/playback/stop", { device_id: deviceId });
 }
 
-/** Survives page teardown — used on unmount, pagehide and sign-out. */
 export function stopPlaybackBeacon(deviceId: string = getDeviceId()): void {
   try {
     const token = getAccessToken();
@@ -619,15 +700,9 @@ export async function kickDevice(deviceId: string): Promise<void> {
   await api.delete(`/playback/${encodeURIComponent(deviceId)}`);
 }
 
-/** Signed stream URL for a <video src>. Never contains the login JWT. */
-export const streamUrl = (path: string) => resolveBackendPath(path);
-
-/* ═══════════════════════════════ Files & folders ═══════════════════════════════ */
+/* ═══════════════════════════════ Flat library ═══════════════════════════════ */
 
 export interface FilesQuery {
-  folderId?: number | null;
-  fileType?: string;
-  search?: string;
   page?: number;
   perPage?: number;
 }
@@ -636,13 +711,7 @@ export async function fetchFiles(q: FilesQuery = {}): Promise<FilesPage> {
   const page = q.page ?? 1;
   const perPage = q.perPage ?? 24;
   const { data } = await api.get("/files", {
-    params: {
-      folder_id: q.folderId ?? undefined,
-      file_type: q.fileType || undefined,
-      search: q.search || undefined,
-      page,
-      per_page: perPage,
-    },
+    params: { page, per_page: perPage },
   });
   return normalisePage(data, page, perPage);
 }
@@ -655,57 +724,10 @@ export async function fetchFile(id: number): Promise<TelegramFile> {
 export async function fetchContinueWatching(
   limit = 20,
 ): Promise<{ files: TelegramFile[] }> {
-  const data = await withRouteFallback(
-    async () =>
-      (await api.get("/files/continue-watching", { params: { limit } })).data,
-    async () => (await api.get("/files/continue", { params: { limit } })).data,
-  );
-  return { files: asArray<TelegramFile>(data, "files") };
-}
-
-export async function fetchRecentFiles(
-  limit = 20,
-): Promise<{ files: TelegramFile[] }> {
-  // Backend route is /tv/recent
-  const { data } = await api.get("/tv/recent", { params: { limit } });
-  return { files: asArray<TelegramFile>(data, "files") };
-}
-
-export async function fetchFolders(): Promise<Folder[]> {
-  const { data } = await api.get("/folders");
-  return asArray<Folder>(data, "folders");
-}
-
-export async function fetchFolderTree(): Promise<Folder[]> {
-  const data = await withRouteFallback(
-    async () => (await api.get("/folders/tree")).data,
-    async () => (await api.get("/folders")).data,
-  );
-  return asArray<Folder>(data, "folders");
-}
-
-export async function createFolder(input: {
-  name: string;
-  parent_id?: number | null;
-}): Promise<Folder> {
-  const { data } = await api.post("/folders", {
-    name: input.name,
-    parent_id: input.parent_id ?? null,
+  const { data } = await api.get("/files/continue-watching", {
+    params: { limit },
   });
-  return data as Folder;
-}
-
-export async function renameFolder(id: number, name: string): Promise<Folder> {
-  const { data } = await api.patch(`/folders/${id}`, { name });
-  return data as Folder;
-}
-
-export async function renameFile(
-  id: number,
-  name: string,
-): Promise<TelegramFile> {
-  const { data } = await api.patch(`/files/${id}`, { file_name: name });
-  return data as TelegramFile;
+  return { files: asArray<TelegramFile>(data, "files") };
 }
 
 export async function deleteFile(id: number): Promise<void> {
@@ -714,85 +736,42 @@ export async function deleteFile(id: number): Promise<void> {
 
 export async function deleteFiles(ids: number[]): Promise<void> {
   if (!ids.length) return;
-  try {
-    await api.post("/files/batch-delete", ids);
-  } catch (e) {
-    if (!routeMissing(e)) throw e;
-    try {
-      await api.post("/files/delete", { file_ids: ids });
-    } catch (e2) {
-      if (!routeMissing(e2)) throw e2;
-      for (const id of ids) await deleteFile(id); // last resort: one at a time
-    }
-  }
+  await api.post("/files/batch-delete", ids);
 }
 
-export async function deleteFolder(id: number): Promise<void> {
-  await api.delete(`/folders/${id}`);
-}
-
-export async function deleteFolders(ids: number[]): Promise<void> {
-  for (const id of ids) await deleteFolder(id);
-}
-
-export async function moveFiles(input: {
-  ids: number[];
-  folderId: number | null;
-}): Promise<void> {
-  if (!input.ids.length) return;
-  // Backend route is /files/batch-move with payload { ids, folder_id }
-  await api.post("/files/batch-move", {
-    ids: input.ids,
-    folder_id: input.folderId,
-  });
-}
-
-export async function moveFolders(input: {
-  ids: number[];
-  folderId: number | null;
-}): Promise<void> {
-  if (!input.ids.length) return;
-  // Backend route is /folders/batch-move with payload { ids, parent_id }
-  await api.post("/folders/batch-move", {
-    ids: input.ids,
-    parent_id: input.folderId,
-  });
-}
-
-export async function postProgress(p: ProgressPayload): Promise<void> {
+/** POST /files/{id}/progress — the server owns the 95% completed rule. */
+export async function postProgress(p: ProgressPayload): Promise<ProgressResult> {
   const body = {
     position: Math.max(0, Math.floor(p.position)),
     duration: Math.max(0, Math.floor(p.duration ?? 0)),
   };
-  await withRouteFallback(
-    async () => {
-      await api.post(`/files/${p.fileId}/progress`, body);
-    },
-    async () => {
-      await api.post(`/progress/${p.fileId}`, body);
-    },
+  const { data } = await api.post<ProgressResult>(
+    `/files/${p.fileId}/progress`,
+    body,
   );
+  return {
+    position: Number(data?.position) || body.position,
+    duration: Number(data?.duration) || body.duration,
+    completed: !!data?.completed,
+  };
 }
 
-/* ═══════════════════════════════ Thumbnails (F7 / F10 / F16) ═══════════════════════════════ */
+/* ═══════════════════════════════ Thumbnails ═══════════════════════════════ */
 
-const THUMB_LIMIT = 64;
+const THUMB_LIMIT = 128;
 const thumbCache = new Map<number, string>();
-const thumbOrder: number[] = [];
-const thumbPending = new Map<number, Promise<string>>();
+const thumbPending = new Map<number, Promise<string | null>>();
 
 function rememberThumb(id: number, url: string) {
-  // Revoke existing URL for this ID if it exists (prevents leaks on re-fetch)
   const existing = thumbCache.get(id);
   if (existing) URL.revokeObjectURL(existing);
   thumbCache.set(id, url);
-  thumbOrder.push(id);
-  while (thumbOrder.length > THUMB_LIMIT) {
-    const old = thumbOrder.shift();
-    if (old === undefined || old === id) continue;
-    const ou = thumbCache.get(old);
-    if (ou) URL.revokeObjectURL(ou);
-    thumbCache.delete(old);
+  while (thumbCache.size > THUMB_LIMIT) {
+    const oldest = thumbCache.keys().next().value as number | undefined;
+    if (oldest === undefined) break;
+    const dead = thumbCache.get(oldest);
+    if (dead) URL.revokeObjectURL(dead);
+    thumbCache.delete(oldest);
   }
 }
 
@@ -803,26 +782,37 @@ export function revokeThumbnail(id: number): void {
   const url = thumbCache.get(id);
   if (url) URL.revokeObjectURL(url);
   thumbCache.delete(id);
-  const i = thumbOrder.indexOf(id);
-  if (i >= 0) thumbOrder.splice(i, 1);
 }
 
-export async function fetchThumbnailBlob(
-  fileId: number,
-  path: string,
-): Promise<string> {
+/** Revoke every blob URL. Safe to call on unmount / page teardown. */
+export function clearThumbnailCache(): void {
+  for (const url of thumbCache.values()) URL.revokeObjectURL(url);
+  thumbCache.clear();
+}
+
+if (typeof window !== "undefined") {
+  window.addEventListener("pagehide", clearThumbnailCache);
+  window.addEventListener("beforeunload", clearThumbnailCache);
+}
+
+/** Authorised thumbnail as a blob URL. Tokens never enter <img src>. */
+export async function getThumbnailUrl(fileId: number): Promise<string | null> {
   const hit = thumbCache.get(fileId);
   if (hit) return hit;
   const pending = thumbPending.get(fileId);
   if (pending) return pending;
 
   const job = api
-    .get(resolveBackendPath(path), { responseType: "blob", timeout: 20000 })
+    .get(`/files/${fileId}/thumbnail`, {
+      responseType: "blob",
+      timeout: 20000,
+    })
     .then(({ data }) => {
       const url = URL.createObjectURL(data as Blob);
       rememberThumb(fileId, url);
       return url;
     })
+    .catch(() => null)
     .finally(() => {
       thumbPending.delete(fileId);
     });
@@ -831,10 +821,8 @@ export async function fetchThumbnailBlob(
   return job;
 }
 
-/** Authorised blob thumbnail. Returns null while loading or when the file has no poster. */
-export function useThumbnailUrl(
+export function useThumbnail(
   fileId?: number | null,
-  path?: string | null,
   enabled = true,
 ): string | null {
   const [url, setUrl] = useState<string | null>(() =>
@@ -842,7 +830,7 @@ export function useThumbnailUrl(
   );
 
   useEffect(() => {
-    if (fileId == null || !path || !enabled) {
+    if (fileId == null || !enabled) {
       setUrl(null);
       return;
     }
@@ -852,17 +840,13 @@ export function useThumbnailUrl(
       return;
     }
     let live = true;
-    fetchThumbnailBlob(fileId, path)
-      .then((u) => {
-        if (live) setUrl(u);
-      })
-      .catch(() => {
-        if (live) setUrl(null);
-      });
+    void getThumbnailUrl(fileId).then((u) => {
+      if (live) setUrl(u);
+    });
     return () => {
       live = false;
     };
-  }, [fileId, path, enabled]);
+  }, [fileId, enabled]);
 
   return url;
 }
@@ -871,7 +855,6 @@ export function useThumbnailUrl(
 
 type AnyMutation = UseMutationResult<unknown, unknown, unknown, unknown>;
 
-/** v4 calls it isLoading, v5 calls it isPending — expose both so screens never break. */
 function compat<T extends object>(
   m: T,
 ): T & { isPending: boolean; isLoading: boolean } {
@@ -892,8 +875,9 @@ function useCompatMutation<TData, TVars, TContext = unknown>(
   > & { isPending: boolean; isLoading: boolean };
 }
 
+/** Flat library, newest first. `_folderId` is accepted only for call-site compatibility. */
 export function useFiles(
-  folderId: number | null = null,
+  _folderId: number | null = null,
   fileType?: string,
   search?: string,
   page = 1,
@@ -901,8 +885,8 @@ export function useFiles(
   enabled = true,
 ): UseQueryResult<FilesPage> {
   return useQuery({
-    queryKey: qk.files(folderId, fileType, search, page, perPage),
-    queryFn: () => fetchFiles({ folderId, fileType, search, page, perPage }),
+    queryKey: qk.files(null, fileType, search, page, perPage),
+    queryFn: () => fetchFiles({ page, perPage }),
     enabled,
     staleTime: 30_000,
     retry: 1,
@@ -930,36 +914,18 @@ export function useContinueWatching(
   });
 }
 
-export function useRecentFiles(
-  limit = 20,
-): UseQueryResult<{ files: TelegramFile[] }> {
-  return useQuery({
-    queryKey: qk.recent(limit),
-    queryFn: () => fetchRecentFiles(limit),
-    staleTime: 60_000,
-    retry: 1,
-  });
-}
+export type MeQueryResult = UseQueryResult<User | null> & {
+  me: User | null;
+  user: User | null;
+  role: Role;
+};
 
-export function useFolders(): UseQueryResult<Folder[]> {
-  return useQuery({
-    queryKey: qk.folders(),
-    queryFn: fetchFolders,
-    staleTime: 60_000,
-    retry: 1,
-  });
-}
-
-export function useFolderTree(): UseQueryResult<Folder[]> {
-  return useQuery({
-    queryKey: qk.folderTree(),
-    queryFn: fetchFolderTree,
-    staleTime: 60_000,
-    retry: 1,
-  });
-}
-
-export function useMe(): UseQueryResult<Me> & { role: UserRole } {
+/**
+ * FAIL-CLOSED session lookup.
+ * While loading, on a 401, on a network failure or on an unknown role the
+ * result is null and the role is "unknown" — never "admin".
+ */
+export function useMe(): MeQueryResult {
   const q = useQuery({
     queryKey: qk.me(),
     queryFn: fetchMe,
@@ -967,9 +933,10 @@ export function useMe(): UseQueryResult<Me> & { role: UserRole } {
     retry: false,
     enabled: isAuthenticated(),
   });
-  return Object.assign({}, q, {
-    role: q.data?.role ?? "admin",
-  }) as UseQueryResult<Me> & { role: UserRole };
+  const user = q.data ?? null;
+  const role: Role =
+    user?.role === "admin" ? "admin" : user?.role === "guest" ? "guest" : "unknown";
+  return Object.assign({}, q, { me: user, user, role }) as MeQueryResult;
 }
 
 export function useBotInfo(): UseQueryResult<BotInfo> {
@@ -1004,8 +971,6 @@ function useLibraryInvalidation() {
     void qc.invalidateQueries({ queryKey: qk.continueAll() });
     void qc.invalidateQueries({ queryKey: ["recent"] });
     void qc.invalidateQueries({ queryKey: ["file"] });
-    void qc.invalidateQueries({ queryKey: qk.folders() });
-    void qc.invalidateQueries({ queryKey: qk.folderTree() });
   };
 }
 
@@ -1025,77 +990,17 @@ export function useDeleteFiles() {
   });
 }
 
-export function useDeleteFolder() {
-  const invalidate = useLibraryInvalidation();
-  return useCompatMutation<void, number>({
-    mutationFn: (id) => deleteFolder(id),
-    onSuccess: invalidate,
-  });
-}
-
-export function useDeleteFolders() {
-  const invalidate = useLibraryInvalidation();
-  return useCompatMutation<void, number[]>({
-    mutationFn: (ids) => deleteFolders(ids),
-    onSuccess: invalidate,
-  });
-}
-
-export function useMoveFiles() {
-  const invalidate = useLibraryInvalidation();
-  return useCompatMutation<void, { ids: number[]; folderId: number | null }>({
-    mutationFn: moveFiles,
-    onSuccess: invalidate,
-  });
-}
-
-export function useMoveFolders() {
-  const invalidate = useLibraryInvalidation();
-  return useCompatMutation<void, { ids: number[]; folderId: number | null }>({
-    mutationFn: moveFolders,
-    onSuccess: invalidate,
-  });
-}
-
-export function useCreateFolder() {
-  const invalidate = useLibraryInvalidation();
-  return useCompatMutation<Folder, { name: string; parent_id?: number | null }>(
-    {
-      mutationFn: createFolder,
-      onSuccess: invalidate,
-    },
-  );
-}
-
-export function useUpdateFile() {
-  const invalidate = useLibraryInvalidation();
-  return useCompatMutation<TelegramFile, { id: number; name: string }>({
-    mutationFn: ({ id, name }) => renameFile(id, name),
-    onSuccess: invalidate,
-  });
-}
-
-export function useUpdateFolder() {
-  const invalidate = useLibraryInvalidation();
-  return useCompatMutation<Folder, { id: number; name: string }>({
-    mutationFn: ({ id, name }) => renameFolder(id, name),
-    onSuccess: invalidate,
-  });
-}
-
-/* ── Progress (F9): patch caches in place, never refetch on a 10 s timer ──── */
+/* ── Progress: patch caches in place so playback never triggers a refetch storm ── */
 
 function patchProgressCaches(
   qc: ReturnType<typeof useQueryClient>,
   p: ProgressPayload,
 ) {
   const dur = p.duration && p.duration > 0 ? p.duration : undefined;
-  const completed = dur ? p.position >= dur * 0.95 : undefined;
   const patch = (f: TelegramFile): TelegramFile => ({
     ...f,
     last_pos: p.position,
     ...(dur ? { duration: dur } : {}),
-    ...(completed !== undefined ? { completed } : {}),
   });
 
   const single = qc.getQueryData<TelegramFile>(qk.file(p.fileId));
@@ -1123,14 +1028,13 @@ function patchProgressCaches(
 
 export function useUpdateProgress() {
   const qc = useQueryClient();
-  return useCompatMutation<void, ProgressPayload>({
+  return useCompatMutation<ProgressResult, ProgressPayload>({
     mutationFn: postProgress,
     onMutate: async (payload) => {
       patchProgressCaches(qc, payload);
     },
-    // Progress is best-effort: a failed write must never interrupt playback or spam toasts.
     onError: () => {
-      /* swallowed on purpose */
+      /* Progress is best-effort: never interrupt playback. */
     },
   });
 }
@@ -1138,7 +1042,7 @@ export function useUpdateProgress() {
 /* ── Playback hooks ──────────────────────────────────────────────────────── */
 
 export function usePlaybackStart() {
-  return useCompatMutation<PlaybackStart, number>({
+  return useCompatMutation<PlaybackStartResult, number>({
     mutationFn: (fileId) => startPlayback(fileId),
   });
 }
@@ -1191,22 +1095,6 @@ export function formatFileSize(bytes?: number | null): string {
     return `${(b / 1024 ** 2).toFixed(b >= 10 * 1024 ** 2 ? 0 : 1)} MB`;
   if (b >= 1024) return `${Math.round(b / 1024)} KB`;
   return `${b} B`;
-}
-
-export function formatResumeLabel(
-  pos?: number | null,
-  duration?: number | null,
-): string {
-  const p = Number(pos) || 0;
-  const d = Number(duration) || 0;
-  if (p <= 0) return "";
-  if (d <= 0) return `Resume ${formatDuration(p)}`;
-  const left = Math.max(0, d - p);
-  if (left >= 3600)
-    return `${formatDuration(p)} · ${Math.floor(left / 3600)}h ${Math.round((left % 3600) / 60)}m left`;
-  if (left >= 60)
-    return `${formatDuration(p)} · ${Math.round(left / 60)} min left`;
-  return `${formatDuration(p)} · ${Math.floor(left)}s left`;
 }
 
 export default api;
