@@ -22,7 +22,7 @@
  * optional `title`, `duration` (0 = sticky) and `action: { label, onClick }`.
  * ─────────────────────────────────────────────────────────────────────────────
  */
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import { AlertTriangle, CheckCircle2, Info, X, XCircle } from 'lucide-react';
 import { useAppStore } from '../lib/store';
 
@@ -104,7 +104,13 @@ const EXIT_MS = 170;
 
 export default function Toasts() {
     const { toasts, removeToast, isPlayerMinimized } = useAppStore();
-    const list = (toasts ?? []) as StoreToast[];
+    const list = useMemo(() => {
+        const unique = new Map<string, StoreToast>();
+        for (const toast of (toasts ?? []) as StoreToast[]) {
+            unique.set(`${toneOf(toast)}\u0000${messageOf(toast)}`, toast);
+        }
+        return [...unique.values()];
+    }, [toasts]);
 
     const [leaving, setLeaving] = useState<Set<string | number>>(new Set());
     const [paused, setPaused] = useState(false);
