@@ -4,8 +4,8 @@
 
 * **Baseline Commit:** `5f0d769d7c8c143f27e419da90622505d153bcf0`
 * **Active Branch:** `hearth/production-hardening`
-* **Current Task:** `T3` — Session & Playback Core
-* **Last Verified Commit:** `5f0d769` (baseline)
+* **Current Task:** `T4` — Telegram Client Safety
+* **Last Verified Commit:** `see git log (T2 merged at 07d2130; T3 on top)`
 
 ---
 
@@ -13,8 +13,8 @@
 
 * [ ] **T0** — Setup: create branch + export Neon backup + backup `backend/session/` + save baseline `pytest` & `npm run build` output
 * [x] **T1** — Dependencies & Environment (`backend/requirements.txt`, `requirements-dev.txt`, `.env.example`)
-* [ ] **T2** — Schema Truth & DB Hardening (`models.py`, `database.py`, `config.py`)
-* [ ] **T3** — Session & Playback Core (`playback.py`, `auth.py`, `routers/auth.py`, `tests/test_playback.py`)
+* [x] **T2** — Schema Truth & DB Hardening (`models.py`, `database.py`, `config.py`)
+* [x] **T3** — Session & Playback Core (`playback.py`, ~~`auth.py`~~ moved to T6, `routers/auth.py`, `tests/test_playback.py`)
 * [ ] **T4** — Telegram Client Safety (`telegram.py` in-place mutation & FloodWait retries)
 * [ ] **T5** — Management Surface & Bot (`bot.py` callback auth gates, `/help`, `/users`, `/guest`, `/kick`)
 * [ ] **T6** — Media Security & Headers (`routers/streaming.py`, `main.py`, strip `slowapi`)
@@ -30,11 +30,29 @@
 
 ---
 
+## Amendments
+
+* T3->T6: family stream-token version/membership enforcement moved to T6.
+
+## Deferred notes (found in review, do NOT fix now)
+
+* routers/auth.py `_get_or_create_family_user` hardcodes role="admin"; must read
+  family_members in T5.
+* bot.get_or_create_user uses settings.auth_users while init_db reconciles from
+  family_members — converge on the table in T5.
+* app/__init__.py eagerly imports app.main (import side effects) — clean in T12.
+* test_schema_migration.py patched_db calls monkeypatch.undo() in teardown —
+  fragile but green; leave unless it breaks.
+
+---
+
 ## Session Execution Log
 
 *(Append one line per completed session: `YYYY-MM-DD | Task | Commit SHA | Gate Result`)*
 
 * `2026-11-18 | T0 | 5f0d769 | Baseline verified; plan, progress, and handoff files initialized.`
 * `2026-11-18 | T1 | fresh-venv install + pip check + imports OK (pyrotgfork 2.2.24.1); .env.example rewritten as fail-closed Neon template; aiosqlite added to dev deps`
+* `2026-11-18 | T2 | full pytest green (String(10), guest default, family_members seed, idempotent init_db, sqlite pool-kwargs fix); merged via PR #8 at 07d2130`
+* `2026-11-18 | T3 | full pytest green (kick->fresh start->heartbeat survives, 2-slot cap, owner-scoped logout/logout-all, stop_owner, ratelimit verified)`
 
 **Note:** T0 Neon export + Telegram session backup are operator actions, still pending and REQUIRED before T2 schema changes.

@@ -32,6 +32,7 @@ You are continuing the **Hearth** production-hardening build.
 9. **Deployment Resource Constraints:** Target environment is a **512MB RAM Debian VPS** (`Python 3.11`, `uvicorn --workers 1`) paired with Neon PostgreSQL, Cloudflare Pages, DuckDNS, and Caddy. Keep memory footprints minimal and bounded.
 10. **Publish Before Session End:** Every task must end with the work pushed to origin OR published to GitHub by the operator. Never leave commits only inside the sandbox — a previous session's T1 was lost this way.
 11. **Log Format:** `PROGRESS.md` log lines must NOT contain the commit's own SHA. Format: `YYYY-MM-DD | T<n> | gate result`. `git log` is the authoritative SHA record.
+12. **Single Final Commit:** the task's code, tests, `PROGRESS.md` and any doc/state updates must all land in ONE final commit, pushed before the session ends. Never leave state files edited-but-uncommitted — the operator must not have to fix anything locally.
 
 ---
 

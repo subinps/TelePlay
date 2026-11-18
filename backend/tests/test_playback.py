@@ -144,8 +144,8 @@ def test_same_second_kick_then_fresh_start_survives(monkeypatch):
 
     base = 1_700_000_000.5  # mid-second wall clock
     monkeypatch.setattr(pb.time, "time", lambda: base)
-    lim.kick("A")                       # floor = float(int(base)) = base-0.5
-    assert lim._revoked_before["A"] == float(base)  # integer-granularity floor
+    lim.kick("A")                       # floor = float(int(base)) = 1700000000.0
+    assert lim._revoked_before["A"] == float(int(base))  # integer-granularity floor
 
     # Fresh authenticated start minted in the SAME whole second: iat == floor.
     ok, _ = start(lim, "A", owner=1, reactivate=True)
