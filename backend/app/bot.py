@@ -5,14 +5,19 @@ Handles commands, file uploads, and inline callbacks.
 Production features:
 - Telegram-first delete order with result checking
 - Upload compensation (delete Telegram message if DB insert fails)
-- Fail-closed auth middleware (deny all when AUTH_USERS empty)
-- Fail-closed guest expiry check
-- Safe error handling throughout
+- Callback auth gate (P1-03): every callback requires an active family
+  membership; destructive actions require the owner (admin_telegram_id).
+  Revoked/removed users never execute a callback.
+- Family membership management (owner-only): /users, /user_add, /user_remove.
+- Playback management (owner-only): /sessions, /kick.
+- Guest management: /guest, /guest status, /guest off.
+- Help, paginated /myfiles, full /file <id> metadata.
 """
 
 import os
 import re
 import secrets
+import time
 from datetime import datetime, timedelta
 
 from pyrogram import filters
@@ -23,13 +28,13 @@ from pyrogram.types import (
     Message,
     WebAppInfo,
 )
-from sqlalchemy import func, select
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from .auth import hash_pin, revoke_guest_tokens
 from .config import get_settings
 from .database import async_session
-from .models import File, GuestCredential, LoginCode, User
+from .models import FamilyMember, File, GuestCredential, LoginCode, User
 from .playback import limiter
 from .telegram import (
     delete_from_storage_channel,
@@ -52,6 +57,11 @@ VIDEO_EXTS = {
     ".flv",
     ".3gp",
 }
+
+MYFILES_PAGE_SIZE = 10
+
+# Callback actions that mutate state and require the owner (admin_telegram_id).
+DESTRUCTIVE_CALLBACKS = {"confirmdelfile", "logout_all_confirm", "kick", "user_remove"}
 
 
 def format_size(size_bytes: int) -> str:
@@ -93,7 +103,7 @@ def sanitize_filename(name: str) -> str:
 def detect_file_type(message, media) -> str:
     """
     Detect if a document is actually a video based on extension or MIME.
-    
+
     Telegram sends many video files (especially MKV/AVI) as "document" rather than "video".
     This helper checks MIME type and file extension to correctly identify them as video.
     """
@@ -110,23 +120,38 @@ def detect_file_type(message, media) -> str:
     return "document"
 
 
+async def _get_family_member(db: AsyncSession, telegram_id: int):
+    """Return the FamilyMember row for a Telegram id, or None."""
+    result = await db.execute(
+        select(FamilyMember).where(FamilyMember.telegram_id == telegram_id)
+    )
+    return result.scalar_one_or_none()
+
+
 async def get_or_create_user(
     telegram_id: int,
     username: str = None,
     first_name: str = None,
     last_name: str = None,
 ) -> User:
-    """Get or create a user record in the database."""
+    """Get or create a user record in the database.
+
+    Role is derived from family_members (the single source of truth, reconciled
+    by init_db on every boot): active family members are admins, everyone else
+    is a guest. This converges with init_db's reconciliation logic.
+    """
     async with async_session() as db:
         result = await db.execute(select(User).where(User.telegram_id == telegram_id))
         user = result.scalar_one_or_none()
         if not user:
+            member = await _get_family_member(db, telegram_id)
+            role = "admin" if (member is not None and member.active) else "guest"
             user = User(
                 telegram_id=telegram_id,
                 username=username,
                 first_name=first_name,
                 last_name=last_name,
-                role="admin" if telegram_id in settings.auth_users else "guest",
+                role=role,
             )
             db.add(user)
             await db.commit()
@@ -139,7 +164,7 @@ async def get_web_app_button(
 ) -> InlineKeyboardButton:
     """
     Generate a one-time code bound to this Telegram user and return a WebAppInfo button.
-    
+
     The code is 8 digits, expires in 2 minutes, and is pre-bound to the user's Telegram ID.
     This allows one-click login from Telegram without the user needing to copy/paste a code.
     """
@@ -174,7 +199,7 @@ async def get_web_app_button(
 async def check_auth(client, message: Message):
     """
     Block unauthorized users from using the bot.
-    
+
     This runs before all other handlers (group=-2). If AUTH_USERS is empty,
     the bot rejects everyone (fail closed for security). If the user is not
     in AUTH_USERS, the bot replies with an error and stops processing.
@@ -196,9 +221,9 @@ async def check_auth(client, message: Message):
         message.stop_propagation()
 
 
-# ═════════════════════════════════════════════════════════════════════════════
+# ════════════════════════════════════════════════════════════════════════════
 # Command Handlers
-# ═════════════════════════════════════════════════════════════════════════════
+# ════════════════════════════════════════════════════════════════════════════
 
 @tg_client.on_message(filters.command("start") & filters.private)
 async def start_command(client, message: Message):
@@ -267,29 +292,40 @@ async def start_command(client, message: Message):
 
 @tg_client.on_message(filters.command("help") & filters.private)
 async def help_command(client, message: Message):
-    """Show help text."""
+    """Show help text documenting every command, grouped by category."""
     await message.reply(
         "📖 **Media Hub Help**\n\n"
         "━━━━━━━━━━━━━━━━━━━━\n"
-        "📤 **UPLOADING FILES**\n"
+        "📋 **GENERAL**\n"
         "━━━━━━━━━━━━━━━━━━━━\n"
-        "Forward any video, audio, image or document to me.\n"
-        "I'll save it to the shared library for streaming.\n\n"
-        "━━━━━━━━━━━━━━━━━━━━\n"
-        "📋 **COMMANDS**\n"
-        "━━━━━━━━━━━━━━━━━━━━\n\n"
-        "**General:**\n"
         "• /start - Welcome message\n"
-        "• /help - This help message\n"
+        "• /help - This help guide\n"
         "• /web - Get authenticated web link\n"
         "• /login - Get/verify login code for TV\n"
         "• /logout_all - Invalidate all active sessions\n"
-        "• /guest - Create a Guest PIN (Admin only)\n"
-        "• /guest off - Disable Guest access\n"
         "• /sync - Clean up dead links (Admin only)\n\n"
-        "**File Management:**\n"
-        "• /myfiles - List recent library files with IDs\n"
-        "• /file `<id>` - Manage a specific file\n\n"
+        "━━━━━━━━━━━━━━━━━━━━\n"
+        "📁 **FILE MANAGEMENT**\n"
+        "━━━━━━━━━━━━━━━━━━━━\n"
+        "• /myfiles - Recent library files with IDs (paginated)\n"
+        "• /file `<id>` - Full metadata and Delete for a file\n\n"
+        "━━━━━━━━━━━━━━━━━━━━\n"
+        "👥 **FAMILY MANAGEMENT** (Owner only)\n"
+        "━━━━━━━━━━━━━━━━━━━━\n"
+        "• /users - List active family members with owner flag\n"
+        "• /user_add `<telegram_id>` - Add a family member as admin\n"
+        "• /user_remove `<telegram_id>` - Remove member and kill sessions\n\n"
+        "━━━━━━━━━━━━━━━━━━━━\n"
+        "▶️ **PLAYBACK** (Owner only)\n"
+        "━━━━━━━━━━━━━━━━━━━━\n"
+        "• /sessions - List active playback sessions\n"
+        "• /kick `<device_id>` - Kick a playback device\n\n"
+        "━━━━━━━━━━━━━━━━━━━━\n"
+        "🎟 **GUEST**\n"
+        "━━━━━━━━━━━━━━━━━━━━\n"
+        "• /guest - Generate a Guest PIN (Admin only)\n"
+        "• /guest status - Show current PIN state and expiry\n"
+        "• /guest off - Disable Guest access\n\n"
         "━━━━━━━━━━━━━━━━━━━━\n"
         "📁 **SUPPORTED FILES**\n"
         "━━━━━━━━━━━━━━━━━━━━\n"
@@ -301,50 +337,80 @@ async def help_command(client, message: Message):
     )
 
 
-@tg_client.on_message(filters.command("myfiles") & filters.private)
-async def myfiles_command(client, message: Message):
-    """List recent library files with IDs for management."""
+async def _show_myfiles(target, telegram_id: int, offset: int = 0, edit: bool = False) -> None:
+    """Render a page of 10 library files with an optional Next button."""
     async with async_session() as db:
         result = await db.execute(
-            select(File).order_by(File.created_at.desc()).limit(10)
+            select(File)
+            .order_by(File.created_at.desc())
+            .offset(offset)
+            .limit(MYFILES_PAGE_SIZE + 1)
         )
         files = result.scalars().all()
 
+    has_next = len(files) > MYFILES_PAGE_SIZE
+    files = files[:MYFILES_PAGE_SIZE]
+
     if not files:
-        await message.reply(
-            "📭 The shared library is empty.\n\nSend me a video to get started!"
+        text = "📭 The shared library is empty.\n\nSend me a video to get started!"
+        markup = InlineKeyboardMarkup(
+            [[await get_web_app_button(telegram_id, "🌐 Open Web")]]
         )
-        return
+    else:
+        text = "📁 **Recent Library Files:**\n\n"
+        for f in files:
+            emoji = {"video": "🎬", "audio": "🎵", "document": "📄", "image": "🖼"}.get(
+                f.file_type, "📎"
+            )
+            text += f"{emoji} `{f.id}` | {f.file_name}\n   └ {format_size(f.file_size)}"
+            if f.duration:
+                text += f" • {format_duration(f.duration)}"
+            text += "\n\n"
+        text += "💡 Use /file <id> to manage a file"
 
-    text = "📁 **Recent Library Files:**\n\n"
-    for f in files:
-        emoji = {"video": "🎬", "audio": "🎵", "document": "📄", "image": "🖼"}.get(
-            f.file_type, "📎"
-        )
-        text += f"{emoji} `{f.id}` | {f.file_name}\n   └ {format_size(f.file_size)}"
-        if f.duration:
-            text += f" • {format_duration(f.duration)}"
-        text += "\n\n"
+        buttons = [[await get_web_app_button(telegram_id, "🌐 Open Web")]]
+        if has_next:
+            buttons.append(
+                [
+                    InlineKeyboardButton(
+                        "Next ➡️", callback_data=f"myfiles_next:{offset + MYFILES_PAGE_SIZE}"
+                    )
+                ]
+            )
+        markup = InlineKeyboardMarkup(buttons)
 
-    text += "💡 Use /file <id> to manage a file"
-    await message.reply(
-        text,
-        reply_markup=InlineKeyboardMarkup(
-            [
-                [await get_web_app_button(message.from_user.id, "🌐 Open Web")],
-            ]
-        ),
-    )
+    if edit:
+        await target.edit(text, reply_markup=markup)
+    else:
+        await target.reply(text, reply_markup=markup)
+
+
+@tg_client.on_message(filters.command("myfiles") & filters.private)
+async def myfiles_command(client, message: Message):
+    """List recent library files with IDs for management (first page)."""
+    await _show_myfiles(message, message.from_user.id, offset=0, edit=False)
 
 
 @tg_client.on_message(filters.command("guest") & filters.private)
 async def guest_command(client, message: Message):
-    """Generate or disable guest PIN (admin only)."""
-    # Only the first AUTH_USERS ID can generate guest pins
-    if message.from_user.id != settings.auth_users[0]:
-        return await message.reply("Admin only.")
+    """Generate, show status, or disable guest PIN (admin only)."""
+    # Only the owner can manage guest access
+    if message.from_user.id != settings.admin_telegram_id:
+        return await message.reply("Owner only.")
 
     arg = message.command[1].lower() if len(message.command) > 1 else ""
+
+    if arg == "status":
+        async with async_session() as db:
+            cred = await db.get(GuestCredential, 1)
+        now = datetime.utcnow()
+        if not cred or not cred.pin_hash or not cred.expires_at:
+            text = "🚫 Guest access is currently off."
+        elif cred.expires_at <= now:
+            text = f"🚫 Guest PIN expired at {cred.expires_at}."
+        else:
+            text = f"🎟 Guest PIN is active, expires at {cred.expires_at}."
+        return await message.reply(text)
 
     async with async_session() as db:
         cred = await db.get(GuestCredential, 1)
@@ -363,7 +429,10 @@ async def guest_command(client, message: Message):
             cred.expires_at = datetime.utcnow() + timedelta(
                 hours=settings.guest_pin_hours
             )
-            text = f"🎟 **Guest PIN:** `{pin}`\n\nValid for {settings.guest_pin_hours} hours. Old guest sessions were ended."
+            text = (
+                f"🎟 **Guest PIN:** `{pin}`\n\n"
+                f"Valid for {settings.guest_pin_hours} hours. Old guest sessions were ended."
+            )
 
         await db.commit()
 
@@ -373,42 +442,158 @@ async def guest_command(client, message: Message):
     await message.reply(text)
 
 
-async def sync_with_channel() -> int:
-    """Delete DB rows whose Telegram message no longer exists."""
-    async with async_session() as db:
-        rows = (await db.execute(select(File))).scalars().all()
-        gone = []
-        for i in range(0, len(rows), 100):
-            batch = rows[i : i + 100]
-            msgs = await tg_client.get_messages(
-                settings.telegram_storage_channel_id,
-                [r.channel_message_id for r in batch],
-            )
-            alive = {m.id for m in msgs if m and not getattr(m, "empty", False)}
-            gone += [r for r in batch if r.channel_message_id not in alive]
+@tg_client.on_message(filters.command("users") & filters.private)
+async def users_command(client, message: Message):
+    """List active family members with owner flag (owner only)."""
+    if message.from_user.id != settings.admin_telegram_id:
+        return await message.reply("Owner only.")
 
-        for r in gone:
-            await db.delete(r)
+    async with async_session() as db:
+        result = await db.execute(
+            select(FamilyMember)
+            .where(FamilyMember.active == True)  # noqa: E712
+            .order_by(FamilyMember.added_at)
+        )
+        members = result.scalars().all()
+
+    if not members:
+        return await message.reply("No active family members.")
+
+    text = "👥 **Active Family Members:**\n\n"
+    for m in members:
+        flag = "👑 owner" if m.is_owner else "member"
+        text += f"• `{m.telegram_id}` ({flag})\n"
+    await message.reply(text)
+
+
+async def _remove_family_member(db: AsyncSession, telegram_id: int) -> bool:
+    """Deactivate a family member, demote their user row, bump auth_version, revoke sessions."""
+    result = await db.execute(
+        select(FamilyMember).where(FamilyMember.telegram_id == telegram_id)
+    )
+    member = result.scalar_one_or_none()
+    if not member or not member.active:
+        return False
+
+    member.active = False
+
+    result = await db.execute(select(User).where(User.telegram_id == telegram_id))
+    user = result.scalar_one_or_none()
+    owner_id = None
+    if user is not None:
+        user.role = "guest"
+        user.auth_version = int(user.auth_version or 0) + 1
+        owner_id = user.id
+
+    await db.commit()
+
+    if owner_id is not None:
+        limiter.stop_owner(owner_id)
+
+    return True
+
+
+@tg_client.on_message(filters.command("user_add") & filters.private)
+async def user_add_command(client, message: Message):
+    """Add a family member (owner only)."""
+    if message.from_user.id != settings.admin_telegram_id:
+        return await message.reply("Owner only.")
+
+    if len(message.command) < 2:
+        return await message.reply("Usage: /user_add <telegram_id>")
+
+    try:
+        telegram_id = int(message.command[1])
+    except ValueError:
+        return await message.reply("❌ Invalid telegram ID.")
+
+    async with async_session() as db:
+        member = await _get_family_member(db, telegram_id)
+        if member is None:
+            db.add(
+                FamilyMember(
+                    telegram_id=telegram_id, is_owner=False, active=True
+                )
+            )
+        else:
+            member.active = True
+            member.is_owner = False
+
+        result = await db.execute(select(User).where(User.telegram_id == telegram_id))
+        user = result.scalar_one_or_none()
+        if user is not None:
+            user.role = "admin"
+
         await db.commit()
 
-        # Clear metadata + thumbnail + byte caches for every removed row.
-        from .routers.streaming import invalidate_meta
-
-        for r in gone:
-            invalidate_meta(r.id, r.channel_message_id)
-
-    return len(gone)
+    await message.reply("Added")
 
 
-@tg_client.on_message(filters.command("sync") & filters.private)
-async def sync_command(client, message: Message):
-    """Clean up orphaned database rows (files whose Telegram message was deleted)."""
-    if message.from_user.id != settings.auth_users[0]:
-        return await message.reply("Admin only.")
+@tg_client.on_message(filters.command("user_remove") & filters.private)
+async def user_remove_command(client, message: Message):
+    """Remove a family member and kill their sessions (owner only)."""
+    if message.from_user.id != settings.admin_telegram_id:
+        return await message.reply("Owner only.")
 
-    status = await message.reply("🔄 Syncing library with Telegram...")
-    n = await sync_with_channel()
-    await status.edit(f"✅ Sync done. Removed {n} dead entr{'y' if n == 1 else 'ies'}.")
+    if len(message.command) < 2:
+        return await message.reply("Usage: /user_remove <telegram_id>")
+
+    try:
+        telegram_id = int(message.command[1])
+    except ValueError:
+        return await message.reply("❌ Invalid telegram ID.")
+
+    async with async_session() as db:
+        ok = await _remove_family_member(db, telegram_id)
+
+    if ok:
+        await message.reply("Removed and sessions killed")
+    else:
+        await message.reply("Not a family member.")
+
+
+@tg_client.on_message(filters.command("sessions") & filters.private)
+async def sessions_command(client, message: Message):
+    """List active playback sessions (owner only)."""
+    if message.from_user.id != settings.admin_telegram_id:
+        return await message.reply("Owner only.")
+
+    sessions = limiter.active()
+    if not sessions:
+        return await message.reply("No active playback sessions.")
+
+    now = time.monotonic()
+    text = "🎬 **Active Playback Sessions:**\n\n"
+    for s in sessions:
+        started_ago = int(now - s.started_at)
+        text += (
+            f"• `{s.device_id}` owner={s.owner_id} file={s.file_id} "
+            f"started {started_ago}s ago\n"
+        )
+
+    buttons = [
+        [
+            InlineKeyboardButton(
+                f"Kick {s.device_id}", callback_data=f"kick:{s.device_id}"
+            )
+        ]
+        for s in sessions
+    ]
+    await message.reply(text, reply_markup=InlineKeyboardMarkup(buttons))
+
+
+@tg_client.on_message(filters.command("kick") & filters.private)
+async def kick_command(client, message: Message):
+    """Kick a playback device (owner only)."""
+    if message.from_user.id != settings.admin_telegram_id:
+        return await message.reply("Owner only.")
+
+    if len(message.command) < 2:
+        return await message.reply("Usage: /kick <device_id>")
+
+    device_id = message.command[1]
+    limiter.kick(device_id)
+    await message.reply("Kicked")
 
 
 @tg_client.on_message(filters.command("web") & filters.private)
@@ -504,9 +689,47 @@ async def logout_all_command(client, message: Message):
     )
 
 
-# ═════════════════════════════════════════════════════════════════════════════
+@tg_client.on_message(filters.command("sync") & filters.private)
+async def sync_command(client, message: Message):
+    """Clean up orphaned database rows (files whose Telegram message was deleted)."""
+    if message.from_user.id != settings.admin_telegram_id:
+        return await message.reply("Admin only.")
+
+    status = await message.reply("🔄 Syncing library with Telegram...")
+    n = await sync_with_channel()
+    await status.edit(f"✅ Sync done. Removed {n} dead entr{'y' if n == 1 else 'ies'}.")
+
+
+async def sync_with_channel() -> int:
+    """Delete DB rows whose Telegram message no longer exists."""
+    async with async_session() as db:
+        rows = (await db.execute(select(File))).scalars().all()
+        gone = []
+        for i in range(0, len(rows), 100):
+            batch = rows[i : i + 100]
+            msgs = await tg_client.get_messages(
+                settings.telegram_storage_channel_id,
+                [r.channel_message_id for r in batch],
+            )
+            alive = {m.id for m in msgs if m and not getattr(m, "empty", False)}
+            gone += [r for r in batch if r.channel_message_id not in alive]
+
+        for r in gone:
+            await db.delete(r)
+        await db.commit()
+
+        # Clear metadata + thumbnail + byte caches for every removed row.
+        from .routers.streaming import invalidate_meta
+
+        for r in gone:
+            invalidate_meta(r.id, r.channel_message_id)
+
+    return len(gone)
+
+
+# ════════════════════════════════════════════════════════════════════════════
 # File Upload Handler
-# ═════════════════════════════════════════════════════════════════════════════
+# ════════════════════════════════════════════════════════════════════════════
 
 @tg_client.on_message(
     filters.private & (filters.video | filters.audio | filters.document | filters.photo)
@@ -514,7 +737,7 @@ async def logout_all_command(client, message: Message):
 async def handle_file(client, message: Message):
     """
     Handle file uploads: forward to storage channel, save metadata to DB.
-    
+
     Production safety:
     - Forward to Telegram FIRST
     - If forward succeeds, insert DB row
@@ -631,14 +854,32 @@ async def handle_file(client, message: Message):
             await status_msg.edit(f"❌ Failed to process file: {e!s}")
 
 
-# ═════════════════════════════════════════════════════════════════════════════
+# ════════════════════════════════════════════════════════════════════════════
 # Callback Query Handlers
-# ═════════════════════════════════════════════════════════════════════════════
+# ════════════════════════════════════════════════════════════════════════════
 
 @tg_client.on_callback_query()
 async def handle_callback(client, callback: CallbackQuery):
     """Handle inline keyboard button presses."""
-    data = callback.data
+    data = callback.data or ""
+    sender_id = callback.from_user.id
+
+    # ═══ Callback auth gate (P1-03) ═══
+    # Every callback requires an active family membership. Destructive actions
+    # additionally require the owner (admin_telegram_id). Revoked/removed users
+    # (active=False) are never allowed to execute a callback.
+    async with async_session() as db:
+        member = await _get_family_member(db, sender_id)
+    if not member or not member.active:
+        await callback.answer("Unauthorized", show_alert=True)
+        return
+
+    is_owner = sender_id == settings.admin_telegram_id
+    action = data.split(":")[0]
+
+    if action in DESTRUCTIVE_CALLBACKS and not is_owner:
+        await callback.answer("Unauthorized", show_alert=True)
+        return
 
     if data == "logout_all_confirm":
         async with async_session() as db:
@@ -667,34 +908,12 @@ async def handle_callback(client, callback: CallbackQuery):
         await callback.answer()
 
     elif data == "show_files":
-        async with async_session() as db:
-            result = await db.execute(
-                select(File).order_by(File.created_at.desc()).limit(10)
-            )
-            files = result.scalars().all()
+        await _show_myfiles(callback.message, callback.from_user.id, offset=0, edit=False)
+        await callback.answer()
 
-        if not files:
-            await callback.message.reply("📭 The shared library is empty.")
-            await callback.answer()
-            return
-
-        text = "📁 **Recent Library Files:**\n\n"
-        for f in files:
-            emoji = {"video": "🎬", "audio": "🎵", "document": "📄", "image": "🖼"}.get(
-                f.file_type, "📎"
-            )
-            text += (
-                f"{emoji} `{f.id}` | {f.file_name}\n   └ {format_size(f.file_size)}\n\n"
-            )
-        text += "💡 Use /file <id> to manage a file"
-        await callback.message.reply(
-            text,
-            reply_markup=InlineKeyboardMarkup(
-                [
-                    [await get_web_app_button(callback.from_user.id, "🌐 Open Web")],
-                ]
-            ),
-        )
+    elif data.startswith("myfiles_next:"):
+        offset = int(data.split(":", 1)[1])
+        await _show_myfiles(callback.message, callback.from_user.id, offset=offset, edit=True)
         await callback.answer()
 
     elif data.startswith("delfile:"):
@@ -759,7 +978,7 @@ async def handle_callback(client, callback: CallbackQuery):
 
             await callback.message.edit(f"✅ File **{file_name}** deleted successfully!")
             await callback.answer("File deleted", show_alert=True)
-        except Exception as e:
+        except Exception:
             await callback.message.edit(
                 f"❌ **Database error**\n\n"
                 f"Deleted **{file_name}** from Telegram, but failed to remove the "
@@ -772,13 +991,19 @@ async def handle_callback(client, callback: CallbackQuery):
         await callback.message.edit("❌ Deletion cancelled.")
         await callback.answer()
 
+    elif data.startswith("kick:"):
+        device_id = data.split(":", 1)[1]
+        limiter.kick(device_id)
+        await callback.message.edit("✅ Kicked.")
+        await callback.answer("Kicked")
+
     else:
         await callback.answer("Unknown action.", show_alert=True)
 
 
-# ═════════════════════════════════════════════════════════════════════════════
+# ════════════════════════════════════════════════════════════════════════════
 # File Action Command
-# ═════════════════════════════════════════════════════════════════════════════
+# ════════════════════════════════════════════════════════════════════════════
 
 @tg_client.on_message(filters.command("file") & filters.private)
 async def file_command(client, message: Message):
@@ -801,9 +1026,17 @@ async def file_command(client, message: Message):
     emoji = {"video": "🎬", "audio": "🎵", "document": "📄", "image": "🖼"}.get(
         file.file_type, "📎"
     )
-    text = f"{emoji} **{file.file_name}**\n\n📦 Size: {format_size(file.file_size)}\n🎭 Type: {file.file_type}\n"
+    text = (
+        f"{emoji} **{file.file_name}**\n\n"
+        f"🆔 ID: `{file.id}`\n"
+        f"📦 Size: {format_size(file.file_size)}\n"
+        f"🎭 Type: {file.file_type}\n"
+    )
     if file.duration:
         text += f"⏱ Duration: {format_duration(file.duration)}\n"
+    if file.mime_type:
+        text += f"📄 MIME: {file.mime_type}\n"
+    text += f"📅 Added: {file.created_at}\n"
 
     await message.reply(
         text,

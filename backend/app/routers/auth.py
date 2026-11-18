@@ -45,7 +45,7 @@ from __future__ import annotations
 
 import logging
 import time
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timezone
 
 from fastapi import APIRouter, Depends, HTTPException, Request, Response, status
 from sqlalchemy import delete, select
@@ -62,7 +62,7 @@ from ..auth import (
 )
 from ..config import get_settings
 from ..database import get_db
-from ..models import GuestCredential, LoginCode, User
+from ..models import FamilyMember, GuestCredential, LoginCode, User
 from ..playback import limiter
 from ..ratelimit import SCOPE_FAMILY, SCOPE_GUEST, enforce, reset
 from ..schemas import (
@@ -123,12 +123,19 @@ async def _get_or_create_guest_user(db: AsyncSession) -> User:
 async def _get_or_create_family_user(db: AsyncSession, telegram_id: int) -> User:
     """
     Family member. The ID came from a bot-minted code, which the bot only issues
-    to AUTH_USERS, so creating the row here is safe and makes login robust even
-    if the member never ran /start.
+    to family members, so the role must be read from family_members (active =>
+    admin) rather than hardcoded. If the id is not an active family member the
+    code is invalid and the caller must reject it.
     """
     result = await db.execute(select(User).where(User.telegram_id == telegram_id))
     user = result.scalar_one_or_none()
     if user is None:
+        member = await db.execute(
+            select(FamilyMember).where(FamilyMember.telegram_id == telegram_id)
+        )
+        member = member.scalar_one_or_none()
+        if member is None or not member.active:
+            raise HTTPException(status.HTTP_400_BAD_REQUEST, "Invalid or expired code")
         user = User(telegram_id=telegram_id, role="admin")
         db.add(user)
         await db.commit()
