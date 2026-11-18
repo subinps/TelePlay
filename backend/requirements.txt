@@ -47,9 +47,8 @@ python-jose[cryptography]==3.3.0
 # [cryptography] uses the fast cryptography library instead of pycryptodome.
 
 # ── Rate Limiting ───────────────────────────────────────────────────────────
-slowapi==0.1.9
-# Rate limiting for FastAPI (legacy routes still use it). Required for: main.py.
-# Note: New auth routes use our custom app.ratelimit module instead.
+# Custom app.ratelimit module handles all rate limiting (no external dependency).
+# slowapi removed in T6 — was only used for legacy routes.
 
 # ── Utilities ───────────────────────────────────────────────────────────────
 psutil==6.1.0

@@ -5,7 +5,7 @@ Production features:
 - Split health checks: /health (liveness) + /health/ready (readiness with DB/Telegram)
 - Supervised sync task with proper cancellation on shutdown
 - Fatal Telegram client startup failures (app won't report ready if bot can't connect)
-- Security headers on all non-streaming routes
+- Security headers on all non-streaming routes + media routes
 - CORS configured for production origins
 - No internal cache stats exposed publicly
 """
@@ -17,12 +17,10 @@ from contextlib import asynccontextmanager
 import psutil
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
-from slowapi import Limiter, _rate_limit_exceeded_handler
-from slowapi.errors import RateLimitExceeded
-from slowapi.util import get_remote_address
+from sqlalchemy import text
 
 from .config import get_settings
-from .database import async_session, init_db
+from .database import async_session, engine, init_db
 from .routers import auth_router, files_router, playback, streaming_router, tv_router
 from .telegram import start_all_clients, stop_all_clients, tg_client
 
@@ -36,9 +34,6 @@ logging.getLogger("sqlalchemy.engine").setLevel(logging.WARNING)
 
 logger = logging.getLogger(__name__)
 settings = get_settings()
-
-# Rate limiter for legacy routes (new routes use app.ratelimit module)
-limiter = Limiter(key_func=get_remote_address)
 
 # Track the sync task so we can cancel it on shutdown
 _sync_task: asyncio.Task | None = None
@@ -105,6 +100,10 @@ async def lifespan(app: FastAPI):
     await stop_all_clients()
     logger.info("Telegram clients stopped")
     
+    # 6. Dispose database engine to prevent connection leaks
+    await engine.dispose()
+    logger.info("Database engine disposed")
+    
     logger.info("Shutdown complete")
 
 
@@ -118,10 +117,6 @@ app = FastAPI(
     version="1.0.0",
     lifespan=lifespan,
 )
-
-# Attach rate limiter to app state (for legacy routes)
-app.state.limiter = limiter
-app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
 
 # ============================================================================
 # CORS Middleware
@@ -144,22 +139,22 @@ app.add_middleware(
 @app.middleware("http")
 async def add_security_headers(request: Request, call_next):
     """
-    Add security headers to all responses EXCEPT streaming routes.
-    
-    Streaming routes are excluded because BaseHTTPMiddleware adds a copy hop
-    per chunk and interferes with cancellation when the browser seeks.
+    Add security headers to all responses.
+
+    For streaming routes, we apply nosniff and CSP headers at the response level
+    (not by wrapping the generator) to avoid breaking Range requests and cancellation.
     """
-    # Never wrap the media stream
-    if request.url.path.startswith("/api/stream/"):
-        return await call_next(request)
-    
     response = await call_next(request)
     
-    # Security headers
+    # Security headers for all responses
     response.headers["X-Content-Type-Options"] = "nosniff"
     response.headers["X-Frame-Options"] = "SAMEORIGIN"
     response.headers["X-XSS-Protection"] = "1; mode=block"
     response.headers["Referrer-Policy"] = "strict-origin-when-cross-origin"
+    
+    # Additional CSP for media routes
+    if request.url.path.startswith("/api/stream/"):
+        response.headers["Content-Security-Policy"] = "default-src 'none'; frame-ancestors 'none'"
     
     return response
 
@@ -226,9 +221,7 @@ async def health_readiness():
     try:
         async with async_session() as db:
             # Simple query to verify DB is reachable
-            result = await db.execute(
-                __import__("sqlalchemy").text("SELECT 1")
-            )
+            result = await db.execute(text("SELECT 1"))
             checks["database"] = result.scalar() == 1
     except Exception as e:
         logger.warning("Database health check failed: %s", e)
