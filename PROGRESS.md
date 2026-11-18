@@ -4,7 +4,7 @@
 
 * **Baseline Commit:** `5f0d769d7c8c143f27e419da90622505d153bcf0`
 * **Active Branch:** `hearth/production-hardening`
-* **Current Task:** `T2` — Schema Truth & DB Hardening
+* **Current Task:** `T3` — Session & Playback Core
 * **Last Verified Commit:** `5f0d769` (baseline)
 
 ---
