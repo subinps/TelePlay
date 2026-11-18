@@ -1,11 +1,12 @@
 # ============================================================================
 # TelePlay/Hearth Backend — Production Dependencies
 # ============================================================================
-# Pinned for reproducible builds on Python 3.14 + 512 MB VPS.
-# Last verified: 2026-11-17
+# Pinned for reproducible builds on Python 3.11-3.14 + 512 MB VPS.
+# (This sandbox verifies on 3.12; the production VPS target is Debian's 3.11.)
+# Last verified: 2026-11-18
 
 # ── Telegram MTProto Client ─────────────────────────────────────────────────
-pyrotgfork==2.2.0
+pyrotgfork==2.2.24.1
 # PyroTGFork is a maintained Pyrogram fork with improved async handling.
 # Required for: bot.py, telegram.py
 

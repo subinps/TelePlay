@@ -20,6 +20,10 @@ httpx==0.28.1
 pytest-cov==6.0.0
 # Coverage reporting for pytest. Optional but recommended.
 
+aiosqlite==0.21.0
+# Offline SQLite test DB (tests/conftest.py). Production uses Neon PostgreSQL,
+# but the unit-test suite runs against sqlite+aiosqlite so no live DB is needed.
+
 # ── Code Quality ────────────────────────────────────────────────────────────
 ruff==0.8.4
 # Fast Python linter and formatter. Run with: ruff check .
