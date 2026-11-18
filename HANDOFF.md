@@ -1,24 +1,38 @@
-You are continuing the Hearth build. Repo: EaruvaTeja/TelePlay, branch hearth/production-hardening.
+# Session Handoff — Hearth Build Execution
 
-RULES — read before anything:
-1. Read PLAN.md and PROGRESS.md first. Execute ONLY the next unchecked task (T-number).
-2. DO NOT re-audit the repo. DO NOT re-plan. DO NOT renumber. The audit in PLAN.md was
-   verified against the baseline commit, including base64 blob checks. Trust it.
-3. web/src/components/MediaPlayer.tsx is FROZEN — never edit it. Preserve every export
-   it imports from api.ts/store.ts.
-4. No new features. Locked scope: flat shared library, Family 8-digit / Guest 6-digit,
-   5 attempts/device/hour, max 2 streams, guest play-only 24h, Telegram-first delete,
-   no QR/folders/search/multi-select/rename/move, web-only.
-5. Known-good code to PRESERVE: auth-before-cache in routers/streaming.py, atomic
-   one-time code consume, fail-closed config validators, HMAC-peppered guest PIN,
-   Telegram-first delete + upload compensation, hearth_player_prefs localStorage key.
-   The filename sanitizer and escape_like are CORRECT — do not "fix" them.
-6. Run the task's Gate from PLAN.md yourself (pytest / npm). If it fails, fix before
-   committing. Never weaken an existing security test to pass.
-7. When the gate passes: git add <task files> + PROGRESS.md, commit as
-   "T<n>: <task name> — gate passed", update PROGRESS.md checkbox + log line.
-8. If you touch anything outside the task's file list, stop and explain why first.
-9. Deployment target: 512MB Debian VPS (Python 3.11, uvicorn --workers 1) + Neon
-   Postgres + Cloudflare Pages + DuckDNS + Caddy. Everything must fit free tiers.
+You are continuing the **Hearth** production-hardening build.
+* **Repository:** `EaruvaTeja/TelePlay`
+* **Branch:** `hearth/production-hardening`
 
-Start now: report the current task from PROGRESS.md, then execute it.
+---
+
+## Mandatory Operating Rules (Read Before Doing Anything)
+
+1. **Read State First:** Read `PLAN.md` and `PROGRESS.md` immediately. Execute **ONLY** the next unchecked task (`T-number`) listed in `PROGRESS.md`.
+2. **Zero Re-Auditing:** Do **NOT** re-audit the repository, do **NOT** re-plan, and do **NOT** renumber tasks. Every issue in `PLAN.md` was verified against the baseline commit `5f0d769`. Trust it completely.
+3. **Frozen File Mandate:** `web/src/components/MediaPlayer.tsx` is **FROZEN** — never edit or touch it. Preserve every export and type signature it imports from `web/src/lib/api.ts` and `web/src/lib/store.ts`.
+4. **Strict Scope Lock:** Do not add new features. Maintain locked scope:
+   * Flat shared media library (no folders, no search, no multi-select, no rename/move).
+   * Auth modes: Family 8-digit passcode / Guest 6-digit PIN (5 attempts/device/hour rate limit).
+   * Playback limits: Maximum 2 concurrent streams; guest accounts play-only with 24h expiration.
+   * Telegram-first deletion with DB compensation; web-only target (no Android, no QR codes, no public links, no transcoding, no Redis).
+5. **Preserve Known-Good Code:**
+   * Auth-before-cache check in `backend/app/routers/streaming.py`.
+   * Atomic one-time login code consumption.
+   * Fail-closed config validators and HMAC-peppered guest PIN verification.
+   * Telegram-first delete & upload compensation loops.
+   * `hearth_player_prefs` `localStorage` key.
+   * Filename sanitizer and `escape_like` utilities (they are already correct—never run "repair" scripts on them).
+6. **Gate Verification Required:** Run the task's **Gate** checks from `PLAN.md` yourself (`pytest`, `npm run lint`, `npm run typecheck`, `npm run build`). If a gate fails, fix the issue before committing. Never weaken or delete an existing security test to make a suite pass.
+7. **Atomic Commit & Progress Update:** When the gate passes:
+   * Update `PROGRESS.md` (check off the completed task box, update `Current task` to the next task, and append a one-line entry to the Session Execution Log).
+   * Stage only the task's exact files plus `PROGRESS.md` (`git add <task files> PROGRESS.md`).
+   * Commit using the exact format: `T<n>: <task name> — gate passed`.
+8. **Scope Boundary Check:** If you believe you must modify any file outside the current task's explicit file list in `PLAN.md`, **stop immediately** and ask/explain why before making changes.
+9. **Deployment Resource Constraints:** Target environment is a **512MB RAM Debian VPS** (`Python 3.11`, `uvicorn --workers 1`) paired with Neon PostgreSQL, Cloudflare Pages, DuckDNS, and Caddy. Keep memory footprints minimal and bounded.
+
+---
+
+## Immediate Startup Instruction
+
+Report the current unchecked task from `PROGRESS.md`, confirm the exact files you will modify, and begin executing that task now.
