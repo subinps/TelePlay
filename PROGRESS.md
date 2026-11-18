@@ -4,7 +4,7 @@
 
 * **Baseline Commit:** `5f0d769d7c8c143f27e419da90622505d153bcf0`
 * **Active Branch:** `hearth/production-hardening`
-* **Current Task:** `T9` — Frontend Keypad, Deep-Links & Cooldowns
+* **Current Task:** `T10` — File Browser & Confirmation Modals
 * **Last Verified Commit:** `see git log (T2 merged at 07d2130; T3 on top)`
 
 ---
@@ -20,7 +20,7 @@
 * [x] **T6** — Media Security & Headers (`routers/streaming.py`, `main.py`, strip `slowapi`)
 * [x] **T7** — File Operations & Atomic Upserts (`routers/files.py` ON CONFLICT progress, batch-delete errors)
 * [x] **T8** — Web API Contracts & Store State (`lib/api.ts`, `lib/store.ts`; preserve `MediaPlayer.tsx`)
-* [ ] **T9** — Frontend Keypad, Deep-Links & Cooldowns (`App.tsx` Family 8 / Guest 6, cooldown UI)
+* [x] **T9** — Frontend Keypad, Deep-Links & Cooldowns (`App.tsx` Family 8 / Guest 6, cooldown UI)
 * [ ] **T10** — File Browser & Confirmation Modals (`FileBrowser.tsx` Done/Esc/Tizen Back, `DeleteConfirmModal.tsx`)
 * [ ] **T11** — Context Menu & Device Fingerprinting (`GlobalContextMenu.tsx`, `Toasts.tsx`, `device.ts`)
 * [ ] **T12** — Toolchain & Repository Hygiene (`package.json`, `.eslintrc.cjs`, `tsconfig.json`, delete dead files)
@@ -58,5 +58,6 @@
 * `2026-11-18 | T6 | full pytest green (nosniff+CSP, safe disposition, family token version/membership checks, heartbeat ownership enforcement, cache bounds, slowapi removed)`
 * `2026-11-18 | T7 | full pytest green (atomic progress upsert, batch delete error reporting, guest delete protection, newest-first sorting, pagination)`
 * `2026-11-18 | T8 | npm typecheck + test + build green (api.ts rewritten without folder functions, logout=this-device-only, fail-closed useMe, 429/409 handling; store.ts stripped folder state, role='unknown' default, toast auto-dismiss)`
+* `2026-11-18 | T9 | npm typecheck + test + build green; pytest 120 passed (8-digit Family / 6-digit Guest keypad, server-driven cooldown, deep-link login, QR UI and encoder removed)`
 
 **Note:** T0 Neon export + Telegram session backup are operator actions, still pending and REQUIRED before T2 schema changes.

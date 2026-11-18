@@ -16,7 +16,6 @@ import {
   AlertTriangle,
   CheckCircle2,
   Clock,
-  ExternalLink,
   FileText,
   Film,
   Loader2,
@@ -24,7 +23,6 @@ import {
   Music,
   Play,
   Plus,
-  QrCode,
   RefreshCw,
   Shield,
   Trash2,
@@ -37,9 +35,10 @@ import {
   useFiles,
   useContinueWatching,
   useDeleteFiles,
+  logout,
   api,
 } from "../lib/api";
-import { useAppStore } from "../lib/store";
+import { useAppStore, useRole } from "../lib/store";
 import { prewarmPlayback } from "./MediaPlayer";
 import Toasts from "./Toasts";
 
@@ -186,28 +185,6 @@ function getDeviceLabel(): string {
 }
 void getDeviceLabel;
 
-let roleCache: string | null = null;
-let rolePromise: Promise<string> | null = null;
-function fetchRole(): Promise<string> {
-  if (roleCache) return Promise.resolve(roleCache);
-  if (!rolePromise) {
-    rolePromise = api
-      .get("/auth/me")
-      .then(({ data }) => {
-        const r =
-          (data as { role?: string; user?: { role?: string } })?.role ??
-          (data as { user?: { role?: string } })?.user?.role ??
-          "admin";
-        roleCache = r === "guest" ? "guest" : "admin";
-        return roleCache;
-      })
-      .catch(() => {
-        roleCache = "admin";
-        return roleCache;
-      });
-  }
-  return rolePromise;
-}
 let botCache: string | null = null;
 let botPromise: Promise<string> | null = null;
 function fetchBotUsername(): Promise<string> {
@@ -279,263 +256,6 @@ function useThumbnail(fileId: number, url?: string | null): string | null {
     };
   }, [fileId, url]);
   return src;
-}
-
-interface QRGrid {
-  size: number;
-  mod: boolean[][];
-}
-const qrCache = new Map<string, QRGrid | null>();
-const QR_DATA_CW = [0, 19, 34, 55, 80, 108];
-const QR_ECC_LEN = [0, 7, 10, 15, 20, 26];
-
-function gfMul(x: number, y: number): number {
-  let z = 0;
-  for (let i = 7; i >= 0; i--) {
-    z = (z << 1) ^ ((z >>> 7) * 0x11d);
-    z ^= ((y >>> i) & 1) * x;
-  }
-  return z & 0xff;
-}
-function rsDivisor(degree: number): number[] {
-  const result: number[] = [];
-  for (let i = 0; i < degree - 1; i++) result.push(0);
-  result.push(1);
-  let root = 1;
-  for (let i = 0; i < degree; i++) {
-    for (let j = 0; j < result.length; j++) {
-      result[j] = gfMul(result[j], root);
-      if (j + 1 < result.length) result[j] ^= result[j + 1];
-    }
-    root = gfMul(root, 0x02);
-  }
-  return result;
-}
-function rsRemainder(data: number[], divisor: number[]): number[] {
-  const result = divisor.map(() => 0);
-  for (const b of data) {
-    const factor = b ^ (result.shift() as number);
-    result.push(0);
-    divisor.forEach((coef, i) => {
-      result[i] ^= gfMul(coef, factor);
-    });
-  }
-  return result;
-}
-function makeQR(text: string): QRGrid | null {
-  if (qrCache.has(text)) return qrCache.get(text) ?? null;
-  const bytes = Array.from(new TextEncoder().encode(text));
-  let version = 0;
-  for (let v = 1; v <= 5; v++)
-    if (bytes.length <= QR_DATA_CW[v] - 2) {
-      version = v;
-      break;
-    }
-  if (!version) {
-    qrCache.set(text, null);
-    return null;
-  }
-
-  const dataCW = QR_DATA_CW[version],
-    eccLen = QR_ECC_LEN[version];
-  const bits: number[] = [];
-  const push = (val: number, len: number) => {
-    for (let i = len - 1; i >= 0; i--) bits.push((val >>> i) & 1);
-  };
-  push(0b0100, 4);
-  push(bytes.length, 8);
-  bytes.forEach((b) => push(b, 8));
-  push(0, Math.min(4, dataCW * 8 - bits.length));
-  while (bits.length % 8) bits.push(0);
-  const data: number[] = [];
-  for (let i = 0; i < bits.length; i += 8) {
-    let b = 0;
-    for (let j = 0; j < 8; j++) b = (b << 1) | bits[i + j];
-    data.push(b);
-  }
-  const pads = [0xec, 0x11];
-  let pi = 0;
-  while (data.length < dataCW) data.push(pads[pi++ % 2]);
-  const codewords = data.concat(rsRemainder(data, rsDivisor(eccLen)));
-
-  const size = 17 + version * 4;
-  const mod: boolean[][] = Array.from({ length: size }, () =>
-    Array<boolean>(size).fill(false),
-  );
-  const fn: boolean[][] = Array.from({ length: size }, () =>
-    Array<boolean>(size).fill(false),
-  );
-  const set = (x: number, y: number, dark: boolean) => {
-    mod[y][x] = dark;
-    fn[y][x] = true;
-  };
-
-  for (let i = 0; i < size; i++) {
-    set(6, i, i % 2 === 0);
-    set(i, 6, i % 2 === 0);
-  }
-  const finder = (cx: number, cy: number) => {
-    for (let dy = -4; dy <= 4; dy++)
-      for (let dx = -4; dx <= 4; dx++) {
-        const x = cx + dx,
-          y = cy + dy;
-        if (x >= 0 && x < size && y >= 0 && y < size) {
-          const d = Math.max(Math.abs(dx), Math.abs(dy));
-          set(x, y, d !== 2 && d !== 4);
-        }
-      }
-  };
-  finder(3, 3);
-  finder(size - 4, 3);
-  finder(3, size - 4);
-  if (version >= 2) {
-    const p = size - 7;
-    for (let dy = -2; dy <= 2; dy++)
-      for (let dx = -2; dx <= 2; dx++) {
-        set(p + dx, p + dy, Math.max(Math.abs(dx), Math.abs(dy)) !== 1);
-      }
-  }
-  const drawFormat = (mask: number) => {
-    const d = (1 << 3) | mask;
-    let rem = d;
-    for (let i = 0; i < 10; i++) rem = (rem << 1) ^ ((rem >>> 9) * 0x537);
-    const fbits = ((d << 10) | rem) ^ 0x5412;
-    const bit = (i: number) => ((fbits >>> i) & 1) === 1;
-    for (let i = 0; i <= 5; i++) set(8, i, bit(i));
-    set(8, 7, bit(6));
-    set(8, 8, bit(7));
-    set(7, 8, bit(8));
-    for (let i = 9; i < 15; i++) set(14 - i, 8, bit(i));
-    for (let i = 0; i < 8; i++) set(size - 1 - i, 8, bit(i));
-    for (let i = 8; i < 15; i++) set(8, size - 15 + i, bit(i));
-    set(8, size - 8, true);
-  };
-  drawFormat(0);
-
-  let i = 0;
-  for (let right = size - 1; right >= 1; right -= 2) {
-    if (right === 6) right = 5;
-    for (let vert = 0; vert < size; vert++) {
-      for (let j = 0; j < 2; j++) {
-        const x = right - j;
-        const up = ((right + 1) & 2) === 0;
-        const y = up ? size - 1 - vert : vert;
-        if (!fn[y][x] && i < codewords.length * 8) {
-          mod[y][x] = ((codewords[i >>> 3] >>> (7 - (i & 7))) & 1) === 1;
-          i++;
-        }
-      }
-    }
-  }
-
-  const maskFn = (m: number, x: number, y: number): boolean => {
-    switch (m) {
-      case 0:
-        return (x + y) % 2 === 0;
-      case 1:
-        return y % 2 === 0;
-      case 2:
-        return x % 3 === 0;
-      case 3:
-        return (x + y) % 3 === 0;
-      case 4:
-        return (Math.floor(x / 3) + Math.floor(y / 2)) % 2 === 0;
-      case 5:
-        return ((x * y) % 2) + ((x * y) % 3) === 0;
-      case 6:
-        return (((x * y) % 2) + ((x * y) % 3)) % 2 === 0;
-      default:
-        return (((x + y) % 2) + ((x * y) % 3)) % 2 === 0;
-    }
-  };
-  const applyMask = (m: number) => {
-    for (let y = 0; y < size; y++)
-      for (let x = 0; x < size; x++) {
-        if (!fn[y][x] && maskFn(m, x, y)) mod[y][x] = !mod[y][x];
-      }
-  };
-  const penalty = (): number => {
-    let score = 0;
-    const lineScore = (line: boolean[]) => {
-      let s = 0,
-        run = 1;
-      for (let k = 1; k <= line.length; k++) {
-        if (k < line.length && line[k] === line[k - 1]) run++;
-        else {
-          if (run >= 5) s += run - 2;
-          run = 1;
-        }
-      }
-      const str = line.map((b) => (b ? "1" : "0")).join("");
-      for (const pat of ["10111010000", "00001011101"]) {
-        let idx = str.indexOf(pat);
-        while (idx !== -1) {
-          s += 40;
-          idx = str.indexOf(pat, idx + 1);
-        }
-      }
-      return s;
-    };
-    for (let y = 0; y < size; y++) score += lineScore(mod[y]);
-    for (let x = 0; x < size; x++) score += lineScore(mod.map((r) => r[x]));
-    for (let y = 0; y < size - 1; y++)
-      for (let x = 0; x < size - 1; x++) {
-        const c = mod[y][x];
-        if (
-          c === mod[y][x + 1] &&
-          c === mod[y + 1][x] &&
-          c === mod[y + 1][x + 1]
-        )
-          score += 3;
-      }
-    let dark = 0;
-    for (const row of mod) for (const c of row) if (c) dark++;
-    const total = size * size;
-    score += (Math.ceil(Math.abs(dark * 20 - total * 10) / total) - 1) * 10;
-    return score;
-  };
-  let best = 0,
-    bestScore = Infinity;
-  for (let m = 0; m < 8; m++) {
-    applyMask(m);
-    drawFormat(m);
-    const s = penalty();
-    if (s < bestScore) {
-      bestScore = s;
-      best = m;
-    }
-    applyMask(m);
-  }
-  applyMask(best);
-  drawFormat(best);
-
-  const grid: QRGrid = { size, mod };
-  qrCache.set(text, grid);
-  return grid;
-}
-
-function QRCode({ value, className }: { value: string; className?: string }) {
-  const qr = useMemo(() => makeQR(value), [value]);
-  if (!qr) return null;
-  const quiet = 4,
-    n = qr.size + quiet * 2;
-  let d = "";
-  for (let y = 0; y < qr.size; y++)
-    for (let x = 0; x < qr.size; x++) {
-      if (qr.mod[y][x]) d += `M${x + quiet} ${y + quiet}h1v1h-1z`;
-    }
-  return (
-    <svg
-      viewBox={`0 0 ${n} ${n}`}
-      className={className}
-      shapeRendering="crispEdges"
-      role="img"
-      aria-label={`QR code linking to ${value}`}
-    >
-      <rect width={n} height={n} fill="#f2f7f6" />
-      <path d={d} fill="#04110f" />
-    </svg>
-  );
 }
 
 /* ═══════════════════════════════ UI atoms ═══════════════════════════════ */
@@ -1015,16 +735,12 @@ function ConfirmDialog({
 function AddSheet({
   sheetRef,
   bot,
-  role,
   onClose,
 }: {
   sheetRef: MutableRef<HTMLDivElement>;
   bot: string;
-  role: string;
   onClose: () => void;
 }) {
-  void role;
-  const link = bot ? `https://t.me/${bot}` : "";
   return (
     <div className="fixed inset-0 z-[120]">
       <div
@@ -1041,69 +757,20 @@ function AddSheet({
       >
         <div className="flex items-center justify-between border-b border-[#1a2524] px-5 py-4">
           <h2 className="flex items-center gap-2 text-lg font-bold text-[#e8f1ef] min-[1600px]:text-2xl">
-            <QrCode className="h-5 w-5 text-[#2dd4bf]" /> Add videos
+            <Plus className="h-5 w-5 text-[#2dd4bf]" /> Add videos
           </h2>
           <IconBtn label="Close" onClick={onClose}>
             <X className="h-5 w-5" />
           </IconBtn>
         </div>
-        <div className="hb-scroll flex-1 space-y-6 overflow-y-auto px-5 py-5">
-          {bot ? (
-            <div className="flex flex-col items-center gap-3">
-              <div className="w-56 rounded-2xl border border-[#2dd4bf]/30 bg-[#f2f7f6] p-3 shadow-[0_15px_50px_-15px_rgba(45,212,191,0.45)] min-[1600px]:w-72">
-                <QRCode value={link} className="h-auto w-full" />
-              </div>
-              <p className="text-center text-sm text-[#9db6b1] min-[1600px]:text-base">
-                Scan with your phone camera to open the bot
-              </p>
-              <a
-                href={link}
-                target="_blank"
-                rel="noreferrer"
-                data-hb-focus
-                className="hb-focus inline-flex items-center gap-2 rounded-xl border border-[#2dd4bf]/40 bg-[#2dd4bf]/10 px-4 py-2 font-mono text-sm font-bold text-[#5eead4] transition-all duration-150 hover:bg-[#2dd4bf]/20 min-[1600px]:text-lg"
-              >
-                <ExternalLink className="h-4 w-4" /> t.me/{bot}
-              </a>
-            </div>
-          ) : (
-            <p className="rounded-xl border border-[#1a2524] bg-[#141d1c] px-4 py-3 text-sm text-[#9db6b1]">
-              Open your bot in Telegram and forward a video to it.
-            </p>
-          )}
-
-          <ol className="space-y-3">
-            {[
-              <>
-                Forward any video to{" "}
-                {bot ? (
-                  <span className="font-mono font-bold text-[#5eead4]">
-                    @{bot}
-                  </span>
-                ) : (
-                  "your bot"
-                )}{" "}
-                — sent “as a file” works too.
-              </>,
-              <>
-                It appears here instantly. The bytes stay on Telegram; Hearth
-                only relays them.
-              </>,
-              <>
-                Press <span className="font-bold text-[#e8f1ef]">OK</span> on a
-                card to play. Two screens can watch at once.
-              </>,
-            ].map((step, i) => (
-              <li key={i} className="flex items-start gap-3">
-                <span className="mt-0.5 flex h-7 w-7 shrink-0 items-center justify-center rounded-full bg-gradient-to-br from-[#2dd4bf] to-[#0d9488] font-mono text-sm font-black text-[#04110f]">
-                  {i + 1}
-                </span>
-                <p className="text-sm leading-relaxed text-[#c3d6d2] min-[1600px]:text-lg">
-                  {step}
-                </p>
-              </li>
-            ))}
-          </ol>
+        <div className="px-5 py-5">
+          <p className="rounded-xl border border-[#1a2524] bg-[#141d1c] px-4 py-3 text-sm leading-relaxed text-[#c3d6d2] min-[1600px]:text-lg">
+            Forward a video to{" "}
+            <span className="font-mono font-bold text-[#5eead4]">
+              @{bot || "YourBotName"}
+            </span>{" "}
+            to add it to your library.
+          </p>
         </div>
       </div>
     </div>
@@ -1194,6 +861,7 @@ function ErrorState({ onRetry }: { onRetry: () => void }) {
 
 export default function FileBrowser() {
   const { setPreviewFile, addToast } = useAppStore();
+  const role = useRole();
 
   /* ── Data (flat library, sorted newest first) ── */
   const [page, setPage] = useState(1);
@@ -1221,7 +889,6 @@ export default function FileBrowser() {
     setHasMore(filesList.page * filesList.per_page < filesList.total);
   }, [filesList]);
 
-  const [role, setRole] = useState<string>("admin");
   const [bot, setBot] = useState<string>("");
   const [manage, setManage] = useState(false);
   const [addOpen, setAddOpen] = useState(false);
@@ -1265,12 +932,6 @@ export default function FileBrowser() {
 
   useEffect(() => {
     let live = true;
-    void fetchRole().then((r) => {
-      if (live) {
-        setRole(r);
-        if (r !== "admin") setManage(false);
-      }
-    });
     void fetchBotUsername().then((b) => {
       if (live) setBot(b);
     });
@@ -1354,9 +1015,11 @@ export default function FileBrowser() {
   const doLogout = async () => {
     setBusy(true);
     try {
-      await api.post("/auth/logout");
-    } catch {}
-    window.location.reload();
+      await logout();
+    } finally {
+      setBusy(false);
+      setConfirm(null);
+    }
   };
 
   useEffect(() => {
@@ -1406,14 +1069,15 @@ export default function FileBrowser() {
             <RolePill role={role} />
           </div>
           <div className="flex shrink-0 items-center gap-1.5 sm:gap-2">
-            <IconBtn
-              label="Refresh library"
-              onClick={refresh}
-              spin={refreshing}
-            >
-              <RefreshCw className="h-5 w-5" />
-            </IconBtn>
             {canManage && (
+              <>
+                <IconBtn
+                  label="Refresh library"
+                  onClick={refresh}
+                  spin={refreshing}
+                >
+                  <RefreshCw className="h-5 w-5" />
+                </IconBtn>
               <button
                 type="button"
                 data-hb-focus
@@ -1422,6 +1086,7 @@ export default function FileBrowser() {
               >
                 <Plus className="h-4 w-4 text-[#2dd4bf]" /> Add
               </button>
+              </>
             )}
             <IconBtn
               label="Sign out"
@@ -1532,7 +1197,6 @@ export default function FileBrowser() {
         <AddSheet
           sheetRef={dialogRef}
           bot={bot}
-          role={role}
           onClose={() => setAddOpen(false)}
         />
       )}
