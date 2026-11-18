@@ -18,7 +18,6 @@ import {
   Clock,
   FileText,
   Film,
-  Loader2,
   LogOut,
   Music,
   Play,
@@ -34,7 +33,6 @@ import {
   formatDuration,
   useFiles,
   useContinueWatching,
-  useDeleteFiles,
   logout,
   api,
 } from "../lib/api";
@@ -53,10 +51,6 @@ type HubFile = TelegramFile & {
   created_at?: string;
   updated_at?: string;
 };
-type ConfirmState =
-  | { kind: "delete"; file: HubFile }
-  | { kind: "logout" }
-  | null;
 type MutableRef<T> = { current: T | null };
 
 const VIDEO_EXTS = [
@@ -81,11 +75,6 @@ const BTN_GHOST =
   "hb-focus inline-flex items-center justify-center gap-2 rounded-xl border border-[#2b3a38] bg-[#1a2524] px-5 py-3 " +
   "text-sm font-semibold text-[#e8f1ef] transition-all duration-150 hover:border-[#2dd4bf]/60 hover:bg-[#22302e] active:scale-[0.98] " +
   "min-[1600px]:px-7 min-[1600px]:py-4 min-[1600px]:text-lg";
-const BTN_DANGER =
-  "hb-focus inline-flex items-center justify-center gap-2 rounded-xl bg-[#f43f5e] px-5 py-3 text-sm font-bold text-white " +
-  "shadow-[0_8px_30px_-6px_rgba(244,63,94,0.55)] transition-all duration-150 hover:bg-[#fb7185] active:scale-[0.98] " +
-  "disabled:opacity-60 min-[1600px]:px-7 min-[1600px]:py-4 min-[1600px]:text-lg";
-
 const HB_CSS = `
 [data-hb-root]{-webkit-tap-highlight-color:transparent;}
 [data-hb-root] .hb-focus:focus{outline:4px solid #5eead4;outline-offset:3px;border-radius:14px;}
@@ -171,9 +160,6 @@ const resolveApiUrl = (path: string): string => {
     : window.location.origin;
   return new URL(path, origin).href;
 };
-const axStatus = (e: unknown) =>
-  (e as { response?: { status?: number } })?.response?.status;
-
 function getDeviceLabel(): string {
   const ua = navigator.userAgent;
   if (/Tizen/i.test(ua)) return "Samsung TV";
@@ -415,7 +401,7 @@ interface VideoCardProps {
   canManage: boolean;
   onPlay: (f: HubFile) => void;
   onDelete: (f: HubFile) => void;
-  onLongManage: (id: number) => void;
+  onOpenActions: (file: HubFile, x: number, y: number) => void;
 }
 
 function VideoCard({
@@ -425,7 +411,7 @@ function VideoCard({
   canManage,
   onPlay,
   onDelete,
-  onLongManage,
+  onOpenActions,
 }: VideoCardProps) {
   const cardRef = useRef<HTMLDivElement>(null);
   const pressTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -456,13 +442,13 @@ function VideoCard({
     if (playable && !manage) prewarmPlayback(file);
   };
 
-  const startPress = () => {
-    if (!canManage) return;
+  const startPress = (x = 0, y = 0) => {
     longFired.current = false;
     if (pressTimer.current) clearTimeout(pressTimer.current);
     pressTimer.current = setTimeout(() => {
       longFired.current = true;
-      onLongManage(file.id);
+      cardRef.current?.focus();
+      onOpenActions(file, x, y);
     }, 550);
   };
   const endPress = () => {
@@ -503,7 +489,7 @@ function VideoCard({
   };
   const onPointerDown = (e: ReactPointerEvent<HTMLDivElement>) => {
     warm();
-    if (e.pointerType !== "mouse") startPress();
+    if (e.pointerType !== "mouse") startPress(e.clientX, e.clientY);
   };
 
   return (
@@ -532,7 +518,8 @@ function VideoCard({
       onPointerCancel={endPress}
       onContextMenu={(e) => {
         e.preventDefault();
-        if (canManage) onLongManage(file.id);
+        cardRef.current?.focus();
+        onOpenActions(file, e.clientX, e.clientY);
       }}
     >
       {/* 16:9 media frame */}
@@ -645,92 +632,7 @@ function VideoCard({
   );
 }
 
-/* ═══════════════════════════ Dialogs & sheets ═══════════════════════════ */
-
-function ConfirmDialog({
-  dialogRef,
-  title,
-  body,
-  confirmLabel,
-  danger,
-  busy,
-  onConfirm,
-  onClose,
-}: {
-  dialogRef: MutableRef<HTMLDivElement>;
-  title: string;
-  body: ReactNode;
-  confirmLabel: string;
-  danger?: boolean;
-  busy: boolean;
-  onConfirm: () => void;
-  onClose: () => void;
-}) {
-  return (
-    <div className="fixed inset-0 z-[120] flex items-center justify-center p-6">
-      <div
-        className="absolute inset-0 bg-black/70 backdrop-blur-[2px]"
-        onClick={busy ? undefined : onClose}
-        aria-hidden="true"
-      />
-      <div
-        ref={dialogRef}
-        role="dialog"
-        aria-modal="true"
-        aria-label={title}
-        className="hb-scale-in relative w-full max-w-md rounded-2xl border border-[#1a2524] bg-[#0e1514] p-6 shadow-[0_30px_80px_-20px_rgba(0,0,0,0.9),0_0_50px_-18px_rgba(45,212,191,0.3)] min-[1600px]:max-w-xl min-[1600px]:p-8"
-      >
-        <div className="mb-4 flex items-center gap-3">
-          <span
-            className={`flex h-12 w-12 shrink-0 items-center justify-center rounded-xl border ${
-              danger
-                ? "border-[#f43f5e]/35 bg-[#f43f5e]/10"
-                : "border-[#fbbf24]/35 bg-[#fbbf24]/10"
-            }`}
-          >
-            {danger ? (
-              <Trash2 className="h-6 w-6 text-[#f43f5e]" />
-            ) : (
-              <LogOut className="h-6 w-6 text-[#fbbf24]" />
-            )}
-          </span>
-          <h2 className="text-lg font-bold text-[#e8f1ef] min-[1600px]:text-2xl">
-            {title}
-          </h2>
-        </div>
-        <div className="mb-6 text-sm leading-relaxed text-[#c3d6d2] min-[1600px]:text-lg">
-          {body}
-        </div>
-        <div className="flex gap-3">
-          <button
-            type="button"
-            data-hb-autofocus
-            onClick={onClose}
-            disabled={busy}
-            className={`${BTN_GHOST} flex-1`}
-          >
-            Cancel
-          </button>
-          <button
-            type="button"
-            onClick={onConfirm}
-            disabled={busy}
-            className={`${danger ? BTN_DANGER : BTN_PRIMARY} flex-1`}
-          >
-            {busy ? (
-              <Loader2 className="h-4 w-4 animate-spin" />
-            ) : danger ? (
-              <Trash2 className="h-4 w-4" />
-            ) : (
-              <LogOut className="h-4 w-4" />
-            )}
-            {confirmLabel}
-          </button>
-        </div>
-      </div>
-    </div>
-  );
-}
+/* ═══════════════════════════ Add sheet ═══════════════════════════ */
 
 function AddSheet({
   sheetRef,
@@ -860,7 +762,12 @@ function ErrorState({ onRetry }: { onRetry: () => void }) {
 /* ═══════════════════════════════ FileBrowser (Home) ═══════════════════════════════ */
 
 export default function FileBrowser() {
-  const { setPreviewFile, addToast } = useAppStore();
+  const {
+    setPreviewFile,
+    addToast,
+    openDeleteConfirm,
+    setActiveContextMenu,
+  } = useAppStore();
   const role = useRole();
 
   /* ── Data (flat library, sorted newest first) ── */
@@ -875,7 +782,6 @@ export default function FileBrowser() {
     refetch: refetchFiles,
   } = useFiles(null, undefined, undefined, page);
   const { data: cwData, refetch: refetchCW } = useContinueWatching(50);
-  const deleteFiles = useDeleteFiles();
 
   useEffect(() => {
     if (!filesList) return;
@@ -892,35 +798,31 @@ export default function FileBrowser() {
   const [bot, setBot] = useState<string>("");
   const [manage, setManage] = useState(false);
   const [addOpen, setAddOpen] = useState(false);
-  const [confirm, setConfirm] = useState<ConfirmState>(null);
-  const [busy, setBusy] = useState(false);
-  const [deletedIds, setDeletedIds] = useState<Set<number>>(new Set());
 
   const rootRef = useRef<HTMLDivElement>(null);
   const scrollRef = useRef<HTMLElement>(null);
-  const dialogRef = useRef<HTMLDivElement>(null);
+  const sheetRef = useRef<HTMLDivElement>(null);
   const sentinelRef = useRef<HTMLDivElement>(null);
-  const lastPlayedRef = useRef<number | null>(null);
+  const manageFocusCard = useRef<HTMLElement | null>(null);
+  const lastFocusedCard = useRef<HTMLElement | null>(null);
 
   const canManage = role === "admin";
   const refreshing = filesFetching;
 
   const continueWatching = useMemo(() => {
     const list = (cwData?.files as HubFile[] | undefined) ?? [];
-    return list.filter(
-      (f) => !deletedIds.has(f.id) && !isWatched(f) && (f.last_pos ?? 0) > 3,
-    );
-  }, [cwData, deletedIds]);
+    return list.filter((f) => !isWatched(f) && (f.last_pos ?? 0) > 3);
+  }, [cwData]);
 
   const videos = useMemo(() => {
-    const list = allFiles.filter((f) => !deletedIds.has(f.id));
+    const list = allFiles;
     return [...list].sort((a, b) => {
       const ta = a.created_at ?? "",
         tb = b.created_at ?? "";
       if (ta && tb && ta !== tb) return tb.localeCompare(ta);
       return b.id - a.id;
     });
-  }, [allFiles, deletedIds]);
+  }, [allFiles]);
 
   const totalCount = filesList?.total ?? videos.length;
   const initialLoading = filesLoading && allFiles.length === 0;
@@ -951,76 +853,122 @@ export default function FileBrowser() {
         addToast("Only videos and audio can play in the browser", "info");
         return;
       }
-      lastPlayedRef.current = f.id;
       setPreviewFile(f);
     },
     [addToast, setPreviewFile],
   );
 
-  const longManage = useCallback(
-    (id: number) => {
-      if (!canManage) return;
-      setManage(true);
-      requestAnimationFrame(() => {
-        rootRef.current
-          ?.querySelector<HTMLButtonElement>(
-            `[data-hb-id="${id}"] [data-hb-delete]`,
-          )
-          ?.focus();
-      });
+  const openActions = useCallback(
+    (file: HubFile, x: number, y: number) => {
+      setActiveContextMenu({ type: "file", item: file, x, y });
     },
-    [canManage],
+    [setActiveContextMenu],
   );
 
   const askDelete = useCallback((f: HubFile) => {
+    if (!canManage) return;
     setAddOpen(false);
-    setConfirm({ kind: "delete", file: f });
+    openDeleteConfirm(f);
+  }, [canManage, openDeleteConfirm]);
+
+  const enterManage = useCallback(() => {
+    if (!canManage) return;
+    const activeElement = document.activeElement as HTMLElement | null;
+    const activeCard = activeElement?.closest("[data-hb-id]");
+    manageFocusCard.current =
+      (activeCard instanceof HTMLElement ? activeCard : null) ??
+      lastFocusedCard.current ??
+      rootRef.current?.querySelector<HTMLElement>("[data-hb-id]") ??
+      null;
+    setManage(true);
+    requestAnimationFrame(() => {
+      const target =
+        manageFocusCard.current?.querySelector<HTMLButtonElement>(
+          "[data-hb-delete]",
+        );
+      (target ?? rootRef.current?.querySelector<HTMLElement>("[data-hb-id]"))
+        ?.focus();
+    });
+  }, [canManage]);
+
+  const exitManage = useCallback(() => {
+    setManage(false);
+    requestAnimationFrame(() => {
+      const origin = manageFocusCard.current?.isConnected
+        ? manageFocusCard.current
+        : null;
+      (origin ?? rootRef.current?.querySelector<HTMLElement>("[data-hb-id]"))
+        ?.focus();
+    });
   }, []);
 
-  const doDelete = async (f: HubFile) => {
-    setBusy(true);
-    setDeletedIds((prev) => new Set(prev).add(f.id));
-    setConfirm(null);
-    try {
-      await deleteFiles.mutateAsync([f.id]);
-      addToast(
-        `Deleted “${f.file_name}” — removed from Telegram too`,
-        "success",
-      );
-      void refetchCW();
-      void refetchFiles();
-    } catch (err) {
-      setDeletedIds((prev) => {
-        const n = new Set(prev);
-        n.delete(f.id);
-        return n;
-      });
-      addToast(
-        axStatus(err) === 403
-          ? "Only the family account can delete"
-          : "Delete failed — the file is still there",
-        "error",
-      );
-    } finally {
-      setBusy(false);
-      setManage(false);
-      requestAnimationFrame(() => {
-        scrollRef.current
-          ?.querySelector<HTMLElement>("[data-hb-focus]")
-          ?.focus();
-      });
-    }
-  };
+  useEffect(() => {
+    if (!manage || !canManage) return;
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (document.querySelector('[role="dialog"]')) return;
+      const back =
+        event.key === "Escape" ||
+        event.key === "Backspace" ||
+        event.key === "BrowserBack" ||
+        event.keyCode === 461 ||
+        event.keyCode === 10009;
+      if (!back) return;
+      event.preventDefault();
+      event.stopPropagation();
+      exitManage();
+    };
+    window.addEventListener("keydown", onKeyDown, true);
+    return () => window.removeEventListener("keydown", onKeyDown, true);
+  }, [canManage, exitManage, manage]);
 
-  const doLogout = async () => {
-    setBusy(true);
-    try {
-      await logout();
-    } finally {
-      setBusy(false);
-      setConfirm(null);
-    }
-  };
+  useEffect(() => {
+    const onMenuKey = (event: KeyboardEvent) => {
+      if (
+        document.querySelector('[role="dialog"]') ||
+        !(
+          event.key === "ContextMenu" ||
+          event.key === "Menu" ||
+          event.key === "Tools" ||
+          event.keyCode === 93
+        )
+      ) {
+        return;
+      }
+      const card = (document.activeElement as HTMLElement | null)?.closest(
+        "[data-hb-id]",
+      );
+      const id = Number(card?.getAttribute("data-hb-id"));
+      const file =
+        allFiles.find((entry) => entry.id === id) ??
+        (cwData?.files as HubFile[] | undefined)?.find(
+          (entry) => entry.id === id,
+        );
+      if (!file) return;
+      event.preventDefault();
+      event.stopPropagation();
+      const rect = card?.getBoundingClientRect();
+      (card as HTMLElement | null)?.focus();
+      openActions(
+        file,
+        rect ? rect.left + rect.width / 2 : 0,
+        rect ? rect.top + rect.height / 2 : 0,
+      );
+    };
+    window.addEventListener("keydown", onMenuKey, true);
+    return () => window.removeEventListener("keydown", onMenuKey, true);
+  }, [allFiles, cwData, openActions]);
+
+  useEffect(() => {
+    const onFileDeleted = (event: Event) => {
+      const fileId = (
+        event as CustomEvent<{ fileId?: number }>
+      ).detail?.fileId;
+      if (typeof fileId !== "number") return;
+      setAllFiles((files) => files.filter((file) => file.id !== fileId));
+    };
+    window.addEventListener("hearth:file-deleted", onFileDeleted);
+    return () => window.removeEventListener("hearth:file-deleted", onFileDeleted);
+  }, []);
 
   useEffect(() => {
     const el = sentinelRef.current;
@@ -1039,6 +987,10 @@ export default function FileBrowser() {
     <div
       ref={rootRef}
       data-hb-root
+      onFocusCapture={(event) => {
+        const card = (event.target as HTMLElement).closest("[data-hb-id]");
+        if (card instanceof HTMLElement) lastFocusedCard.current = card;
+      }}
       className="relative flex h-screen flex-col overflow-hidden bg-[#070b0b] font-sans text-[#e8f1ef]"
     >
       <style>{HB_CSS}</style>
@@ -1071,6 +1023,25 @@ export default function FileBrowser() {
           <div className="flex shrink-0 items-center gap-1.5 sm:gap-2">
             {canManage && (
               <>
+                {manage ? (
+                  <button
+                    type="button"
+                    data-hb-focus
+                    onClick={exitManage}
+                    className={BTN_PRIMARY}
+                  >
+                    Done
+                  </button>
+                ) : (
+                  <button
+                    type="button"
+                    data-hb-focus
+                    onClick={enterManage}
+                    className={BTN_GHOST}
+                  >
+                    Manage
+                  </button>
+                )}
                 <IconBtn
                   label="Refresh library"
                   onClick={refresh}
@@ -1078,19 +1049,19 @@ export default function FileBrowser() {
                 >
                   <RefreshCw className="h-5 w-5" />
                 </IconBtn>
-              <button
-                type="button"
-                data-hb-focus
-                onClick={() => setAddOpen(true)}
-                className={BTN_GHOST}
-              >
-                <Plus className="h-4 w-4 text-[#2dd4bf]" /> Add
-              </button>
+                <button
+                  type="button"
+                  data-hb-focus
+                  onClick={() => setAddOpen(true)}
+                  className={BTN_GHOST}
+                >
+                  <Plus className="h-4 w-4 text-[#2dd4bf]" /> Add
+                </button>
               </>
             )}
             <IconBtn
               label="Sign out"
-              onClick={() => setConfirm({ kind: "logout" })}
+              onClick={() => void logout()}
             >
               <LogOut className="h-5 w-5" />
             </IconBtn>
@@ -1131,7 +1102,7 @@ export default function FileBrowser() {
                         canManage={canManage}
                         onPlay={play}
                         onDelete={askDelete}
-                        onLongManage={longManage}
+                        onOpenActions={openActions}
                       />
                     </div>
                   ))}
@@ -1156,7 +1127,7 @@ export default function FileBrowser() {
                     canManage={canManage}
                     onPlay={play}
                     onDelete={askDelete}
-                    onLongManage={longManage}
+                    onOpenActions={openActions}
                   />
                 ))}
               </div>
@@ -1165,37 +1136,9 @@ export default function FileBrowser() {
         )}
       </main>
 
-      {confirm?.kind === "delete" && (
-        <ConfirmDialog
-          dialogRef={dialogRef}
-          title="Delete this video?"
-          body={
-            <>
-              “{confirm.file.file_name}” will be removed from your library and
-              Telegram.
-            </>
-          }
-          confirmLabel="Delete"
-          danger
-          busy={busy}
-          onConfirm={() => void doDelete(confirm.file)}
-          onClose={() => setConfirm(null)}
-        />
-      )}
-      {confirm?.kind === "logout" && (
-        <ConfirmDialog
-          dialogRef={dialogRef}
-          title="Sign out?"
-          body={<>You will need your PIN or login code to return.</>}
-          confirmLabel="Sign out"
-          busy={busy}
-          onConfirm={() => void doLogout()}
-          onClose={() => setConfirm(null)}
-        />
-      )}
-      {addOpen && !confirm && (
+      {addOpen && (
         <AddSheet
-          sheetRef={dialogRef}
+          sheetRef={sheetRef}
           bot={bot}
           onClose={() => setAddOpen(false)}
         />
