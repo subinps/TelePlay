@@ -536,10 +536,13 @@ function HearthApp() {
     try {
       await deleteFilesMutation.mutateAsync([confirmFile.id]);
       await queryClient.invalidateQueries();
+      window.dispatchEvent(
+        new CustomEvent("hearth:file-deleted", {
+          detail: { fileId: confirmFile.id },
+        }),
+      );
       addToast("Deleted — removed from Telegram too", "success");
       closeDeleteConfirm();
-    } catch {
-      addToast("Delete failed — the file is still there", "error");
     } finally {
       setDeleting(false);
     }
@@ -590,7 +593,7 @@ function HearthApp() {
           name={confirmFile.file_name}
           count={1}
           busy={deleting}
-          onConfirm={() => void deleteSelected()}
+          onConfirm={deleteSelected}
           onClose={closeDeleteConfirm}
         />
       )}

@@ -10,10 +10,10 @@
 import { useEffect, useRef, useState } from 'react';
 import {
     CheckCircle2, Clock, Film, Folder as FolderIcon,
-    Loader2, Music, Play, ShieldAlert, Trash2, X,
+    Loader2, Music, Play, Trash2,
 } from 'lucide-react';
 import { TelegramFile, Folder, api, formatDuration, formatFileSize } from '../lib/api';
-import { useAppStore } from '../lib/store';
+import { useAppStore, useRole } from '../lib/store';
 
 type HubFile = TelegramFile & {
     mime_type?: string | null;
@@ -75,23 +75,6 @@ const isRisky = (f: HubFile) => {
     return ['MKV', 'AVI', 'WMV', 'FLV', 'TS'].includes(c) || (f.mime_type ?? '').includes('matroska');
 };
 
-let roleCache: string | null = null;
-let rolePromise: Promise<string> | null = null;
-function fetchRole(): Promise<string> {
-    if (roleCache) return Promise.resolve(roleCache);
-    if (!rolePromise) {
-        rolePromise = api.get('/auth/me')
-            .then(({ data }) => {
-                const r = (data as { role?: string; user?: { role?: string } })?.role
-                    ?? (data as { user?: { role?: string } })?.user?.role ?? 'admin';
-                roleCache = r === 'guest' ? 'guest' : 'admin';
-                return roleCache;
-            })
-            .catch(() => { roleCache = 'admin'; return roleCache; });
-    }
-    return rolePromise;
-}
-
 const thumbCache = new Map<number, string>();
 function useThumbnail(fileId: number, url?: string | null): string | null {
     const [src, setSrc] = useState<string | null>(() => thumbCache.get(fileId) ?? null);
@@ -139,13 +122,13 @@ function SheetThumb({ file }: { file: HubFile }) {
 
 export default function GlobalContextMenu() {
     const {
-        activeContextMenu, setActiveContextMenu, setPreviewFile, setDeleteConfirm,
+        activeContextMenu, setActiveContextMenu, setPreviewFile, openDeleteConfirm,
         previewFile, deleteConfirm, addToast,
     } = useAppStore();
+    const role = useRole();
 
     const sheetRef = useRef<HTMLDivElement>(null);
     const restoreRef = useRef<HTMLElement | null>(null);
-    const [role, setRole] = useState('admin');
     const [opening, setOpening] = useState(false);
 
     const open = !!activeContextMenu;
@@ -154,13 +137,6 @@ export default function GlobalContextMenu() {
     const file = !isFolder ? (item as HubFile | undefined) : undefined;
     const folder = isFolder ? (item as Folder) : undefined;
     const canManage = role === 'admin';
-
-    useEffect(() => {
-        let live = true;
-        void fetchRole().then(r => { if (live) setRole(r); });
-        return () => { live = false; };
-    }, []);
-
     /* The player owns the screen — never leave a stale sheet behind it. */
     useEffect(() => {
         if (previewFile && activeContextMenu) setActiveContextMenu(null);
@@ -170,7 +146,7 @@ export default function GlobalContextMenu() {
        Stands down when Home is mounted (Home toggles Manage mode itself). */
     useEffect(() => {
         const onKey = (e: KeyboardEvent) => {
-            if (open || previewFile || deleteConfirm) return;
+            if (open || previewFile || deleteConfirm.isOpen) return;
             if (!(e.key === 'ContextMenu' || e.key === 'Menu' || e.keyCode === 93)) return;
             if (document.querySelector('[data-hb-root]')) return;
             const host = (document.activeElement as HTMLElement | null)?.closest?.('[data-file-id]') as HTMLElement | null;
@@ -216,29 +192,13 @@ export default function GlobalContextMenu() {
         };
     }, [open]);
 
-    /* The sheet owns the keyboard (capture phase beats other window listeners). */
+    /* Back keys close the sheet; ordinary Tab navigation remains untrapped. */
     useEffect(() => {
         if (!open) return;
-        const nav = (dir: 1 | -1) => {
-            const items = Array.from(sheetRef.current?.querySelectorAll<HTMLElement>('button:not([disabled])') ?? [])
-                .filter(el => el.getClientRects().length > 0);
-            if (!items.length) return;
-            const i = items.indexOf(document.activeElement as HTMLElement);
-            (items[(i + dir + items.length) % items.length] ?? items[0]).focus();
-        };
         const onKey = (e: KeyboardEvent) => {
-            const k = e.key;
             if (isBackKey(e)) {
                 e.preventDefault(); e.stopPropagation();
                 setActiveContextMenu(null);
-                return;
-            }
-            if (k === 'Tab') { e.preventDefault(); e.stopPropagation(); nav(e.shiftKey ? -1 : 1); return; }
-            if (k === 'ArrowDown' || k === 'ArrowRight') { e.preventDefault(); e.stopPropagation(); nav(1); return; }
-            if (k === 'ArrowUp' || k === 'ArrowLeft') { e.preventDefault(); e.stopPropagation(); nav(-1); return; }
-            if (k === 'Enter' || k === ' ') {
-                if ((e.target as HTMLElement | null)?.closest?.('button')) return;
-                e.preventDefault(); e.stopPropagation();
             }
         };
         window.addEventListener('keydown', onKey, true);
@@ -269,7 +229,8 @@ export default function GlobalContextMenu() {
         setActiveContextMenu(null);
     };
     const doDelete = () => {
-        setDeleteConfirm({ type: isFolder ? 'folder' : 'file', items: [item] });
+        if (!file) return;
+        openDeleteConfirm(file as TelegramFile);
         setActiveContextMenu(null);
     };
 
@@ -307,7 +268,6 @@ export default function GlobalContextMenu() {
             <div
                 ref={sheetRef}
                 role="dialog"
-                aria-modal="true"
                 aria-label={`Actions for ${title}`}
                 className="ha-pop relative flex max-h-[92vh] w-full max-w-lg flex-col overflow-hidden rounded-t-3xl border border-[#1a2524] bg-[#0e1514] shadow-[0_-20px_70px_rgba(0,0,0,0.8)] sm:rounded-2xl sm:shadow-[0_30px_80px_-20px_rgba(0,0,0,0.9),0_0_60px_-24px_rgba(45,212,191,0.4)] min-[1600px]:max-w-2xl"
             >
@@ -351,14 +311,6 @@ export default function GlobalContextMenu() {
                             </div>
                         )}
                     </div>
-                    <button
-                        type="button"
-                        aria-label="Close actions"
-                        onClick={() => setActiveContextMenu(null)}
-                        className="ha-focus inline-flex h-10 w-10 shrink-0 items-center justify-center rounded-xl text-[#9db6b1] transition-all duration-150 hover:bg-white/10 hover:text-white min-[1600px]:h-14 min-[1600px]:w-14"
-                    >
-                        <X className="h-5 w-5" />
-                    </button>
                 </div>
 
                 {/* Simplified Actions: Play/Resume and Delete only */}
@@ -389,15 +341,6 @@ export default function GlobalContextMenu() {
                             </button>
                         );
                     })}
-
-                    {!canManage && (
-                        <div className="flex items-start gap-2.5 rounded-xl border border-[#38bdf8]/30 bg-[#38bdf8]/10 px-4 py-3">
-                            <ShieldAlert className="mt-0.5 h-4 w-4 shrink-0 text-[#7dd3fc]" />
-                            <p className="text-xs font-semibold leading-relaxed text-[#7dd3fc] min-[1600px]:text-base">
-                                Guest access can play only. Ask the family account to change the library.
-                            </p>
-                        </div>
-                    )}
 
                     <button
                         type="button"

@@ -19,7 +19,8 @@
  */
 import { useEffect, useRef, useState } from 'react';
 import type { ReactNode } from 'react';
-import { AlertTriangle, Folder as FolderIcon, Loader2, Trash2, X } from 'lucide-react';
+import { AlertTriangle, Folder as FolderIcon, Loader2, Trash2 } from 'lucide-react';
+import { errorMessage } from '../lib/api';
 
 export interface DeleteConfirmModalProps {
     type: 'file' | 'folder' | 'multiple';
@@ -58,15 +59,6 @@ function ensureDialogStyles() {
 }
 ensureDialogStyles();
 
-const axStatus = (e: unknown) => (e as { response?: { status?: number } })?.response?.status;
-function messageFor(e: unknown): string {
-    const s = axStatus(e);
-    if (s === 403) return 'Only the family account can delete from the library.';
-    if (s === 404) return 'That item is already gone — the library may just need a refresh.';
-    if (s === 401) return 'Your sign-in expired. Close this and sign in again.';
-    return 'Delete failed. Check the connection and try again — nothing was removed.';
-}
-
 export default function DeleteConfirmModal({
     type, name, count = 1, onConfirm, onClose, busy = false, error = null,
 }: DeleteConfirmModalProps) {
@@ -104,7 +96,7 @@ export default function DeleteConfirmModal({
     /* The dialog owns the keyboard while it is open (capture beats other window listeners). */
     useEffect(() => {
         const focusables = () =>
-            Array.from(dialogRef.current?.querySelectorAll<HTMLElement>('button:not([disabled])') ?? [])
+            Array.from(dialogRef.current?.querySelectorAll<HTMLElement>('[data-delete-dialog-action]:not([disabled])') ?? [])
                 .filter(el => el.getClientRects().length > 0);
         const move = (dir: 1 | -1) => {
             const items = focusables();
@@ -147,7 +139,14 @@ export default function DeleteConfirmModal({
             }
             if (alive.current) onClose();
         } catch (e) {
-            if (alive.current) setSelfError(messageFor(e));
+            if (alive.current) {
+                setSelfError(
+                    errorMessage(
+                        e,
+                        'Delete failed. Check the connection and try again — nothing was removed.',
+                    ),
+                );
+            }
         } finally {
             if (alive.current) setSelfBusy(false);
         }
@@ -198,15 +197,6 @@ export default function DeleteConfirmModal({
                         </span>
                         <h2 id="hd-title" className="text-lg font-bold text-[#e8f1ef] min-[1600px]:text-3xl">{title}</h2>
                     </div>
-                    <button
-                        type="button"
-                        aria-label="Close"
-                        disabled={pending}
-                        onClick={onClose}
-                        className="hd-focus inline-flex h-10 w-10 shrink-0 items-center justify-center rounded-xl text-[#9db6b1] transition-all duration-150 hover:bg-white/10 hover:text-white disabled:opacity-40 min-[1600px]:h-14 min-[1600px]:w-14"
-                    >
-                        <X className="h-5 w-5" />
-                    </button>
                 </div>
 
                 <div className="hd-scroll max-h-[45vh] overflow-y-auto px-6 py-4 min-[1600px]:px-8">
@@ -218,8 +208,7 @@ export default function DeleteConfirmModal({
                         <div className="mt-4 flex items-start gap-2.5 rounded-xl border border-[#f43f5e]/30 bg-[#f43f5e]/10 px-4 py-3">
                             <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0 text-[#fda4af] min-[1600px]:h-5 min-[1600px]:w-5" />
                             <p className="text-xs font-semibold leading-relaxed text-[#fda4af] min-[1600px]:text-lg">
-                                This cannot be undone. The original message is deleted from your storage channel —
-                                you would have to send the file to the bot again.
+                                ⚠️ This also permanently deletes the file from your private Telegram storage channel.
                             </p>
                         </div>
                     )}
@@ -239,6 +228,7 @@ export default function DeleteConfirmModal({
                     <button
                         ref={cancelRef}
                         type="button"
+                        data-delete-dialog-action
                         data-hb-autofocus
                         disabled={pending}
                         onClick={onClose}
@@ -248,9 +238,10 @@ export default function DeleteConfirmModal({
                     </button>
                     <button
                         type="button"
+                        data-delete-dialog-action
                         disabled={pending}
                         onClick={() => { void run(); }}
-                        className="hd-focus inline-flex flex-1 items-center justify-center gap-2 rounded-xl bg-[#f43f5e] px-5 py-3 text-sm font-bold text-white shadow-[0_8px_30px_-6px_rgba(244,63,94,0.6)] transition-all duration-150 hover:bg-[#fb7185] active:scale-[0.98] disabled:opacity-60 min-[1600px]:py-4 min-[1600px]:text-xl"
+                        className="hd-focus inline-flex flex-1 items-center justify-center gap-2 rounded-xl border border-[#f43f5e] bg-transparent px-5 py-3 text-sm font-bold text-[#fda4af] transition-all duration-150 hover:bg-[#f43f5e]/15 active:scale-[0.98] disabled:opacity-60 min-[1600px]:py-4 min-[1600px]:text-xl"
                     >
                         {pending ? <Loader2 className="hd-spin h-4 w-4" /> : <Trash2 className="h-4 w-4" />}
                         {pending ? 'Deleting…' : message ? 'Try again' : many ? `Delete ${count}` : 'Delete'}
