@@ -11,7 +11,7 @@ Startup policy
   * Main client failure is FATAL. If tg_client cannot connect, the application
     lifespan raises and the API does not report "ready". This prevents a silent
     state where uploads/streaming are broken but health checks pass.
-  
+
   * Helper clients are OPTIONAL. If a helper fails to start, it is logged and
     skipped. Streaming continues with whatever clients succeeded. This allows
     degraded operation when a helper bot is misconfigured or rate-limited.
@@ -96,9 +96,9 @@ def _build_client(
     )
 
 
-# ─────────────────────────────────────────────────────────────────────────────
+# ---------------------------------------------------------------------------
 # Client instances
-# ─────────────────────────────────────────────────────────────────────────────
+# ---------------------------------------------------------------------------
 
 # Main bot client (required)
 tg_client: Client = _build_client(
@@ -123,21 +123,32 @@ for i, token in enumerate(settings.telegram_helper_bot_tokens):
 # All active clients (main + helpers) for the streaming engine
 clients: list[Client] = [tg_client] + _helper_clients
 
+# Track which clients actually started, so shutdown only stops those.
+_started_clients: set[Client] = set()
 
-# ─────────────────────────────────────────────────────────────────────────────
+
+# ---------------------------------------------------------------------------
 # Startup / shutdown
-# ─────────────────────────────────────────────────────────────────────────────
+# ---------------------------------------------------------------------------
 
-async def start_one_client(client: Client, is_main: bool = False) -> None:
+async def start_one_client(client: Client, is_main: bool = False) -> bool:
     """
     Start a single Telegram client.
 
     is_main=True: failures are FATAL (re-raised). The app will not report ready.
-    is_main=False: failures are logged and swallowed. The client is skipped.
+    is_main=False: failures are logged and swallowed. Returns False; caller removes
+    the helper from the active pool.
+
+    Returns True on success, False on helper failure.
     """
     name = getattr(client, "name", "unknown_client")
     try:
-        await client.start()
+        result = await client.start()
+        if result is False:
+            if is_main:
+                raise RuntimeError("Main bot client failed to start")
+            logger.warning("Helper client %s reported start failure", name)
+            return False
         me = await client.get_me()
         logger.info(
             "Client %s started → @%s (id=%s)",
@@ -145,6 +156,8 @@ async def start_one_client(client: Client, is_main: bool = False) -> None:
             me.username,
             me.id,
         )
+        _started_clients.add(client)
+        return True
     except (AuthKeyUnregistered, AuthKeyDuplicated, SessionRevoked) as e:
         # Fatal auth errors: session file is invalid or revoked.
         logger.error(
@@ -157,6 +170,7 @@ async def start_one_client(client: Client, is_main: bool = False) -> None:
             raise RuntimeError(f"Main bot client failed to authenticate: {e}") from e
         else:
             logger.warning("Helper client %s disabled due to auth error", name)
+            return False
     except SessionPasswordNeeded as e:
         # 2FA enabled on the account (should not happen for bots, but catch anyway).
         logger.error("Client %s requires 2FA password: %s", name, e)
@@ -164,6 +178,7 @@ async def start_one_client(client: Client, is_main: bool = False) -> None:
             raise RuntimeError(f"Main bot client requires 2FA: {e}") from e
         else:
             logger.warning("Helper client %s disabled due to 2FA requirement", name)
+            return False
     except FloodWait as e:
         # Rate limited during startup. Log and re-raise for main, swallow for helper.
         logger.error("Client %s hit FloodWait during startup: %s seconds", name, e.value)
@@ -171,6 +186,7 @@ async def start_one_client(client: Client, is_main: bool = False) -> None:
             raise RuntimeError(f"Main bot client rate-limited for {e.value}s") from e
         else:
             logger.warning("Helper client %s disabled due to rate limit", name)
+            return False
     except Exception as e:  # noqa: BLE001
         # Network error, Telegram DC unreachable, etc.
         logger.error("Client %s failed to start: %s", name, e, exc_info=True)
@@ -178,6 +194,7 @@ async def start_one_client(client: Client, is_main: bool = False) -> None:
             raise RuntimeError(f"Main bot client failed to connect: {e}") from e
         else:
             logger.warning("Helper client %s disabled due to connection error", name)
+            return False
 
 
 async def start_all_clients() -> None:
@@ -189,31 +206,40 @@ async def start_all_clients() -> None:
 
     This is called from main.py lifespan. If it raises, the API does not start.
     """
+    _started_clients.clear()
+
     # Start main client first (required)
     await start_one_client(tg_client, is_main=True)
 
     # Start helpers (optional, failures logged and skipped)
     failed_helpers: list[Client] = []
     for helper in _helper_clients:
-        try:
-            await start_one_client(helper, is_main=False)
-        except Exception:  # noqa: BLE001 — already logged in start_one_client
+        ok = await start_one_client(helper, is_main=False)
+        if not ok:
             failed_helpers.append(helper)
 
-    # Remove failed helpers from the active clients list
+    # Remove failed helpers from the active clients list IN PLACE.
+    # streaming.py does `from .telegram import clients` at import time and holds
+    # the ORIGINAL list object, so rebinding the name here would leave stale
+    # references in the streaming engine. Mutate the list contents instead.
     if failed_helpers:
-        global clients
-        clients = [c for c in clients if c not in failed_helpers]
+        clients[:] = [c for c in clients if c not in failed_helpers]
         logger.warning(
             "%d helper client(s) failed to start; streaming will use %d client(s)",
             len(failed_helpers),
             len(clients),
         )
 
+    # Keep pool_index stable for streaming.py's getattr(c, "pool_index", i).
+    for i, c in enumerate(clients):
+        c.pool_index = i
+
 
 async def stop_all_clients() -> None:
-    """Stop all Telegram clients gracefully."""
-    for client in clients:
+    """Stop only the clients that actually started; never raises."""
+    to_stop = list(_started_clients)
+    _started_clients.clear()
+    for client in to_stop:
         name = getattr(client, "name", "unknown_client")
         try:
             await client.stop()
@@ -222,9 +248,9 @@ async def stop_all_clients() -> None:
             logger.warning("Error stopping client %s: %s", name, e)
 
 
-# ─────────────────────────────────────────────────────────────────────────────
+# ---------------------------------------------------------------------------
 # Storage channel operations
-# ─────────────────────────────────────────────────────────────────────────────
+# ---------------------------------------------------------------------------
 
 async def forward_to_storage_channel(message) -> object | None:
     """
@@ -236,36 +262,42 @@ async def forward_to_storage_channel(message) -> object | None:
     Used by bot.py when a user forwards a video to the bot — the video is
     persisted in the private storage channel and only its metadata is stored
     in the database.
+
+    FloodWait is retried at most once, and only when the wait is <= 20s.
     """
     channel_id = settings.telegram_storage_channel_id
-    try:
-        forwarded = await message.forward(chat_id=channel_id)
-        if forwarded:
-            logger.info(
-                "Forwarded message %s from user %s to storage channel as %s",
-                message.id, message.from_user.id, forwarded.id,
-            )
-            return forwarded
-        logger.warning("forward_to_storage_channel returned None for message %s", message.id)
-        return None
-    except FloodWait as e:
-        logger.warning(
-            "FloodWait during forward (message %s): wait %s seconds",
-            message.id, e.value,
-        )
-        await asyncio.sleep(e.value)
+    for attempt in range(2):
         try:
             forwarded = await message.forward(chat_id=channel_id)
-            return forwarded if forwarded else None
-        except Exception as retry_err:  # noqa: BLE001
-            logger.error("Forward retry failed after FloodWait: %s", retry_err)
+            if forwarded:
+                logger.info(
+                    "Forwarded message %s from user %s to storage channel as %s",
+                    message.id, message.from_user.id, forwarded.id,
+                )
+                return forwarded
+            logger.warning("forward_to_storage_channel returned None for message %s", message.id)
             return None
-    except Exception as e:  # noqa: BLE001
-        logger.error(
-            "Failed to forward message %s to storage channel: %s",
-            message.id, e, exc_info=True,
-        )
-        return None
+        except FloodWait as e:
+            if attempt == 0 and getattr(e, "value", 0) <= 20:
+                logger.warning(
+                    "FloodWait during forward (message %s): wait %s seconds",
+                    message.id, e.value,
+                )
+                await asyncio.sleep(e.value)
+                continue
+            logger.warning(
+                "FloodWait during forward (message %s): %s seconds — not retrying",
+                message.id, getattr(e, "value", None),
+            )
+            return None
+        except Exception as e:  # noqa: BLE001
+            logger.error(
+                "Failed to forward message %s to storage channel: %s",
+                message.id, e, exc_info=True,
+            )
+            return None
+    return None
+
 
 async def delete_from_storage_channel(message_id: int | list[int]) -> bool:
     """
@@ -278,6 +310,8 @@ async def delete_from_storage_channel(message_id: int | list[int]) -> bool:
       - False: preserve the row for retry or manual reconciliation
 
     This prevents orphaned media in Telegram when the API is unavailable.
+
+    FloodWait is retried at most once, and only when the wait is <= 20s.
     """
     if isinstance(message_id, int):
         message_ids = [message_id]
@@ -288,37 +322,47 @@ async def delete_from_storage_channel(message_id: int | list[int]) -> bool:
         return True
 
     channel_id = settings.telegram_storage_channel_id
-    try:
-        # delete_messages returns True on success, raises on failure
-        result = await tg_client.delete_messages(channel_id, message_ids)
-        if result:
-            logger.info(
-                "Deleted %d message(s) from storage channel: %s",
-                len(message_ids),
-                message_ids,
-            )
-            return True
-        else:
+    for attempt in range(2):
+        try:
+            # delete_messages returns True on success, raises on failure
+            result = await tg_client.delete_messages(channel_id, message_ids)
+            if result:
+                logger.info(
+                    "Deleted %d message(s) from storage channel: %s",
+                    len(message_ids),
+                    message_ids,
+                )
+                return True
+            else:
+                logger.warning(
+                    "delete_messages returned False for message(s): %s",
+                    message_ids,
+                )
+                return False
+        except FloodWait as e:
+            if attempt == 0 and getattr(e, "value", 0) <= 20:
+                logger.warning(
+                    "FloodWait during delete (message(s) %s): wait %s seconds",
+                    message_ids,
+                    e.value,
+                )
+                await asyncio.sleep(e.value)
+                continue
             logger.warning(
-                "delete_messages returned False for message(s): %s",
+                "FloodWait during delete (message(s) %s): %s seconds — not retrying",
                 message_ids,
+                getattr(e, "value", None),
             )
             return False
-    except FloodWait as e:
-        logger.warning(
-            "FloodWait during delete (message(s) %s): wait %s seconds",
-            message_ids,
-            e.value,
-        )
-        return False
-    except Exception as e:  # noqa: BLE001
-        logger.error(
-            "Failed to delete message(s) %s from storage channel: %s",
-            message_ids,
-            e,
-            exc_info=True,
-        )
-        return False
+        except Exception as e:  # noqa: BLE001
+            logger.error(
+                "Failed to delete message(s) %s from storage channel: %s",
+                message_ids,
+                e,
+                exc_info=True,
+            )
+            return False
+    return False
 
 
 async def get_message_from_channel(message_id: int):
