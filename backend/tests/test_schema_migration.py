@@ -41,6 +41,9 @@ def patched_db(monkeypatch, db_url):
     sess = async_sessionmaker(eng, class_=AsyncSession, expire_on_commit=False)
     monkeypatch.setattr(database, "engine", eng)
     monkeypatch.setattr(database, "async_session", sess)
+    # init_db()/get_or_create_user use create_all + session on the PATCHED
+    # module attributes; tests that read raw rows must target this engine.
+    asyncio.run(database.init_db())
     yield eng
     asyncio.run(eng.dispose())
     monkeypatch.undo()
@@ -108,8 +111,16 @@ def test_init_db_seeds_family_owner(patched_db):
     async def go():
         await database.init_db()
         async with patched_db.connect() as conn:
-            rows = (await conn.execute(select(models.FamilyMember))).scalars().all()
-        return rows
+            # .scalars() on a raw (non-ORM) connection returns column values,
+            # not model instances — read the columns explicitly instead.
+            res = await conn.execute(
+                select(
+                    models.FamilyMember.telegram_id,
+                    models.FamilyMember.is_owner,
+                    models.FamilyMember.active,
+                )
+            )
+            return res.all()
 
     rows = asyncio.run(go())
     ids = [r.telegram_id for r in rows]

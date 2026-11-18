@@ -60,16 +60,23 @@ else:
         "Hearth requires postgresql:// (Neon)."
     )
 
-# Create the engine with Neon-safe pool sizes
+# Create the engine with Neon-safe pool sizes.
+# Pool-size kwargs are Postgres-only: aiosqlite uses NullPool and rejects them.
+_pool_kwargs: dict = {}
+if url.get_backend_name() == "postgresql":
+    _pool_kwargs = dict(
+        pool_size=3,  # Reduced: Neon free tier limits concurrent connections
+        max_overflow=2,  # 2 extra on burst only
+        pool_timeout=10,  # Fail fast instead of hanging forever
+    )
+
 engine = create_async_engine(
     url,
     echo=False,
     pool_pre_ping=True,  # Detects stale connections before use
     pool_recycle=1800,  # Recycle every 30 min (Neon free tier timeout)
-    pool_size=3,  # Reduced: Neon free tier limits concurrent connections
-    max_overflow=2,  # 2 extra on burst only
-    pool_timeout=10,  # Fail fast instead of hanging forever
     connect_args=connect_args,
+    **_pool_kwargs,
 )
 
 async_session = async_sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
