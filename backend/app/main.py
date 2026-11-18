@@ -21,7 +21,7 @@ from sqlalchemy import text
 
 from .config import get_settings
 from .database import async_session, engine, init_db
-from .routers import auth_router, files_router, playback, streaming_router, tv_router
+from .routers import auth_router, files_router, playback, streaming_router
 from .telegram import start_all_clients, stop_all_clients, tg_client
 
 # Make application logs visible (uvicorn only configures its own loggers by default).
@@ -166,7 +166,6 @@ async def add_security_headers(request: Request, call_next):
 app.include_router(auth_router, prefix="/api")
 app.include_router(files_router, prefix="/api")
 app.include_router(streaming_router, prefix="/api")
-app.include_router(tv_router, prefix="/api")
 app.include_router(playback.router, prefix="/api")
 
 # Note: folders_router is NOT included (folders router was deleted in File 3)
