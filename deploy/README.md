@@ -181,6 +181,7 @@ sudo journalctl -u hearth -f
 ```
 
 The first boot runs `init_db` DDL with startup sync disabled. Telegram must connect.
+Uvicorn access log is disabled (`--no-access-log`) because it would record signed stream tokens (`?t=`) in journald. Caddy logs all non-stream requests; `/api/stream/*` is intentionally unlogged (`skip_log`). Application logs never contain tokens.
 
 ## 8. Caddy and DuckDNS
 
