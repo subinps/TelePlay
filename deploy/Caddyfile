@@ -1,0 +1,30 @@
+# Works for IPv6-only origin: Let's Encrypt validates inbound via the AAAA record.
+your-domain.duckdns.org {
+    # Never log signed stream URLs (?t=)
+    @stream path /api/stream/*
+    skip_log @stream
+
+    # Health is loopback-only (SSH: curl 127.0.0.1:8000/health/ready)
+    @health path /health /health/ready
+    respond @health 404
+
+    reverse_proxy 127.0.0.1:8000 {
+        flush_interval -1
+        header_up X-Real-IP {remote_host}
+    }
+
+    header {
+        Strict-Transport-Security "max-age=31536000"
+        X-Content-Type-Options "nosniff"
+        Referrer-Policy "no-referrer"
+        -Server
+    }
+
+    log {
+        output file /var/log/caddy/hearth.log {
+            roll_size 10mb
+            roll_keep 5
+        }
+        format json
+    }
+}

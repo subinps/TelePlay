@@ -1,0 +1,29 @@
+[Unit]
+Description=Hearth Media Streaming Service
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=simple
+User=hearth
+Group=hearth
+WorkingDirectory=/opt/hearth/app/backend
+EnvironmentFile=/etc/hearth/hearth.env
+ExecStart=/opt/hearth/app/backend/.venv/bin/uvicorn app.main:app --host 127.0.0.1 --port 8000 --workers 1
+Restart=always
+RestartSec=5
+StandardOutput=journal
+StandardError=journal
+UMask=0077
+# 512MB box: throttle early, hard-cap below total RAM. Tune ONLY after T15 measurement.
+# In LXC these may be host-enforced; verify with: systemctl show hearth -p MemoryMax,MemoryHigh
+MemoryHigh=350M
+MemoryMax=400M
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/var/lib/hearth/session
+
+[Install]
+WantedBy=multi-user.target

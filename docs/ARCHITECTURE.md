@@ -1,3 +1,6 @@
+> ⚠️ HISTORICAL — do NOT follow for this deployment. Current target:
+> Cloudflare Pages + Debian 13 VPS + Caddy + Neon. See deploy/README.md.
+
 # 🏗️ TelePlay — Architecture & Technical Overview
 
 A self-hosted media streaming platform that uses Telegram as its storage backend. Upload files via a Telegram Bot, organize them through a Web App, and stream them to any device — including Android TV.

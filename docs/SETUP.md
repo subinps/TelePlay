@@ -1,3 +1,6 @@
+> ⚠️ HISTORICAL — do NOT follow for this deployment. Current target:
+> Cloudflare Pages + Debian 13 VPS + Caddy + Neon. See deploy/README.md.
+
 # 📖 TelePlay: Setup & Usage Guide
 
 Welcome to **TelePlay**! This guide covers everything from the core concepts to using the bot and apps.
