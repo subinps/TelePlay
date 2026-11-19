@@ -70,3 +70,48 @@ Execute T13 to create the production deployment kit and runbooks.
 - systemd MemoryMax/MemoryHigh effective values — **VERIFY ON VPS**
 - ufw/nftables/provider-firewall behavior and external `:8000` refusal — **VERIFY ON VPS**
 - Server-side IPv4/IPv6 reachability and DuckDNS AAAA/inbound test — **VERIFY ON VPS**
+
+## Fresh T14 Gate Evidence
+
+- **Date:** 2026-11-19
+- **Branch:** `hearth/t14`
+- **Tested SHA:** `56fbf4aa3953c9fc655c254595f7f01d5261f4e1`
+- **Tested tree hash:** `feb6198521b47d4461de819848b571a157ff4b8c`
+- **Dev Python:** Python 3.13.0 — **CONFIRMED**
+- **Node:** v20.19.5 — **CONFIRMED**
+- **npm:** 10.8.2 — **CONFIRMED**
+
+**Backend gates — CONFIRMED**
+
+- `python -m venv .venv` under Python 3.13.0 — fresh virtualenv created successfully.
+- `.venv\Scripts\python -m pip install -r requirements-dev.txt` — **PASS**
+- `.venv\Scripts\python -m pytest -q` — **126 passed, 7 warnings**
+- `.venv\Scripts\python -m compileall -q app` — **PASS**
+- `.venv\Scripts\pip check` — **PASS; no broken requirements**
+- `.venv\Scripts\python -m pip freeze` — captured key pins: `FastAPI 0.115.5`, `Starlette 0.41.3`, `Pydantic 2.10.3`, `SQLAlchemy 2.0.36`, `asyncpg 0.30.0`, `python-jose 3.3.0`, `ecdsa 0.19.2`, `PyroTGFork 2.2.24.1`, `TgCrypto-pyrofork 1.2.8`, `pytest 8.3.4`.
+- `.venv\Scripts\python -m pip install pip-audit` — **CONFIRMED**
+- `.venv\Scripts\pip-audit -r requirements.txt` — **22 known vulnerabilities in 3 packages:** `python-jose 3.3.0` (6 entries), `starlette 0.41.3` (14 entries), `ecdsa 0.19.2` (2 entries). Scanner exit status was nonzero due to findings. No requirements or application files were changed.
+
+**Frontend gates — CONFIRMED**
+
+- Node 20.19.5 temporary runtime; `npm ci` — **PASS**
+- `npm run lint` — **PASS**
+- `npm run typecheck` — **PASS**
+- `npm test` — **2 test files, 13 tests passed**
+- `npm run build` — **PASS**
+- `dist/_redirects` — **CONFIRMED present**
+- `npm audit --omit=dev` — **3 production advisories:** 1 moderate and 2 high; no critical. The vulnerable production dependency chain is `axios`, `follow-redirects`, and `form-data`. No audit fix or dependency edit was performed.
+
+**Hygiene — CONFIRMED**
+
+- `web/src/lib/api.ts logout()` calls `POST /auth/logout`, never `/auth/logout-all`.
+- `/auth/logout-all` and bot `/logout_all` remain present and were not removed.
+- No active `folders_router` or `tv_router` imports were found. The only `folders_router` text is a historical deletion comment in `main.py`.
+- No QR-code generation implementation was found in active backend or frontend code.
+- Precise git tracked-file check found only `.env.example`; no secret `.env`, session, SQL dump, SQLite, or private-media file is tracked.
+- `git diff 84926670051242bbbcd5afae378aa6f319ded062..HEAD -- web/src/components/MediaPlayer.tsx` — **empty**
+- Protected app/deploy/dependency scopes remained unchanged during T14.
+
+**Release status**
+
+Tested SHA = branch tip `56fbf4aa3953c9fc655c254595f7f01d5261f4e1`. After the owner merges the PR, the deployed `RELEASE_SHA` is the merge commit, whose tree is identical to the tested tree. The owner applies tag `v1.0-rc` to that merge commit and records `RELEASE_SHA`. The agent does not tag.

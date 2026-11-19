@@ -5,7 +5,7 @@
 * **Audited Code Baseline:** `84926670051242bbbcd5afae378aa6f319ded062` (main; T1–T12 merged via PR #16; full static audit 2026-11-19)
 * **Historical Dev Baseline:** `5f0d769d7c8c143f27e419da90622505d153bcf0` (T1–T12 era; see git history)
 * **Active Branch:** `main` (task work on `hearth/<task-id>` branches; owner creates + merges PRs)
-* **Current Task:** `T14` — Comprehensive Test Suite & Final Hygiene
+* **Current Task:** `T0` — Verified Backups Before First Production Boot
 * **Release SHA:** frozen at end of T14 (tag `v1.0-rc`) — see Deployment Readiness below
 
 ---
@@ -27,7 +27,7 @@
 * [x] **T12** — Toolchain & Repository Hygiene (`package.json`, `.eslintrc.cjs`, `tsconfig.json`, delete dead files)
 * [x] **T12.1** — Pre-deploy Audit & Surgical Workflow Fixes (`main.py` sync gate, `bot.py` sync guard + `/help`, `gate4_check.py`, `smoke_db.py`, tests, `AUDIT_REPORT.md`) — NEW 2026-11-19
 * [x] **T13** — Production Deployment Kit & Runbooks (`deploy/hearth.service`, `deploy/Caddyfile`, `deploy/backup-neon.sh`, `deploy/duckdns-update.sh`, `deploy/README.md`, `README.md`, historical doc banners)
-* [ ] **T14** — Comprehensive Test Suite & Final Hygiene (fresh clean-checkout gates, advisory review, hygiene greps, evidence, tag `v1.0-rc` → RELEASE_SHA)
+* [x] **T14** — Comprehensive Test Suite & Final Hygiene (fresh clean-checkout gates, advisory review, hygiene greps, evidence, tag `v1.0-rc` → RELEASE_SHA)
 * [ ] **T15** — Real-World Hardware Acceptance (Phase R + runbook deploy + Samsung TV + 512MB VPS matrix; every P0 row PASS)
 * [ ] **T16** — Launch & 72-Hour Observation (GO/NO-GO, family invites, monitoring, Master Review MD → GO, tag `v1.0`) — NEW 2026-11-19
 
@@ -35,7 +35,8 @@
 
 ## Deployment Readiness (owner fills as evidence lands)
 
-* **Phase R (NeoHeberg reachability):** SERVER CONFIRMED IPv6-only 2026-11-19 (curl -4 fail; curl -6 global 2a06:98xx). Clients IPv6 OK. Path: DuckDNS AAAA + Caddy IPv6. NAT64 / DuckDNS / GitHub / Neon / Telegram reachability tests pending at T15 entry.
+* **Phase R FINAL 2026-11-19:** NO NAT64/DNS64 (native IPv4 returned; IPv4 curl failed). CONFIRMED reachable over IPv6: Telegram Bot API (HTTP 302), Telegram MTProto DC TCP (`2001:b28:f23d:f001::a:443`), Neon endpoint (2406:xx AAAA), apt/PyPI/PGDG/Let's Encrypt. IPv4-only fallbacks: DuckDNS update endpoint = set AAAA manually from PC; GitHub clone = scp release tarball/bundle from PC. Telegram MTProto LIBRARY IPv6 selection = verify at first boot (`/health/ready` Telegram connected).
+* **T14 gates:** pytest 126 + npm lint/typecheck/test/build green on Python 3.13.0 / Node 20.19.5; advisories recorded; RELEASE_SHA pending owner merge + tag.
 * **VPS:** NeoHeberg LXC, Debian 13 trixie, 512MB RAM + 512MB swap, ~3.1GB free disk; Python 3.13 native (explicit decision 2026-11-19).
 * **Neon backup verified + off-host:** PENDING (T0)
 * **Session backup:** PENDING (T0; after first boot if fresh install)
@@ -78,5 +79,6 @@
 * `2026-11-19 | PLAN | docs re-baseline: HANDOFF/PLAN/PROGRESS v2 for deploy run (T12.1→T16); full static audit of baseline 8492667 completed (120 tests counted, compileall PASS, contracts verified); owner-committed, docs only`
 * `2026-11-19 | T12.1 | pytest 126 passed; compileall PASS; pip check PASS; npm ci/lint/typecheck/test/build all green (13 frontend tests); docs environment deltas applied`
 * `2026-11-19 | T13 | deployment kit created (systemd unit, Caddyfile, backup+duckdns scripts, IPv6-only runbook, README/docs rewritten); gates: script syntax + static config review, zero app-code diff`
+* `2026-11-19 | T14 | clean-checkout gates green (pytest 126; npm lint/typecheck/test/build); pip check + advisory scan recorded; hygiene clean; MediaPlayer frozen; Phase R final recorded`
 
 **Note:** T0 is REQUIRED before the FIRST production boot (not before T2 — that dev work already shipped under its own gates). Agent never creates/merges PRs; owner merges after reading the agent report.
