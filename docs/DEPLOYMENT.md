@@ -1,3 +1,6 @@
+> ⚠️ HISTORICAL — do NOT follow for this deployment. Current target:
+> Cloudflare Pages + Debian 13 VPS + Caddy + Neon. See deploy/README.md.
+
 # 🚀 TelePlay: Complete Deployment Guide
 
 This guide is designed for everyone, even if you've never used Docker or deployed a website before. Follow these steps carefully to get your media streaming server up and running.
