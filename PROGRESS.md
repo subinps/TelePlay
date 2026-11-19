@@ -5,7 +5,7 @@
 * **Audited Code Baseline:** `84926670051242bbbcd5afae378aa6f319ded062` (main; T1–T12 merged via PR #16; full static audit 2026-11-19)
 * **Historical Dev Baseline:** `5f0d769d7c8c143f27e419da90622505d153bcf0` (T1–T12 era; see git history)
 * **Active Branch:** `main` (task work on `hearth/<task-id>` branches; owner creates + merges PRs)
-* **Current Task:** `T12.3` — Login message polish, 10 playback speeds, DB-outage 503
+* **Current Task:** `T12.4` — DB-wake upload UX, server status button, frontend 503 guidance, stream cleanup
 * **Release SHA:** frozen at end of T14 (tag `v1.0-rc`) — see Deployment Readiness below
 
 ---
@@ -29,7 +29,8 @@
 * [x] **T14** — Comprehensive Test Suite & Final Hygiene (fresh clean-checkout gates, advisory review, hygiene greps, evidence, tag `v1.0-rc` → RELEASE_SHA)
 * [ ] **T12.2** — Local-validation fixes (batch-delete JSONResponse + regression test; uvicorn `--no-access-log`; runbook note)
 * [ ] **T12.3** — Login message polish, 10 playback speeds (owner-authorized MediaPlayer exception), DB-outage 503
-* [ ] **T0** — Verified backups BEFORE first production boot (Neon dump verified + off-host; session backup; restore procedure recorded in `deploy/BACKUP_LOG.md`) — ON HOLD pending owner acceptance and release re-freeze
+* [ ] **T12.4** — DB-wake upload UX + server status button + frontend 503 guidance + stream producer cleanup
+* [ ] **T0** — Verified backups BEFORE first production boot (Neon dump verified + off-host; session backup; restore procedure recorded in `deploy/BACKUP_LOG.md`) — ON HOLD; deployment paused pending T12.4 merge and `v1.0-rc` re-point
 * [ ] **T15** — Real-World Hardware Acceptance (Phase R + runbook deploy + Samsung TV + 512MB VPS matrix; every P0 row PASS)
 * [ ] **T16** — Launch & 72-Hour Observation (GO/NO-GO, family invites, monitoring, Master Review MD → GO, tag `v1.0`) — NEW 2026-11-19
 
@@ -40,7 +41,8 @@
 * **Phase R FINAL 2026-11-19:** NO NAT64/DNS64 (native IPv4 returned; IPv4 curl failed). CONFIRMED reachable over IPv6: Telegram Bot API (HTTP 302), Telegram MTProto DC TCP (`2001:b28:f23d:f001::a:443`), Neon endpoint (2406:xx AAAA), apt/PyPI/PGDG/Let's Encrypt. IPv4-only fallbacks: DuckDNS update endpoint = set AAAA manually from PC; GitHub clone = scp release tarball/bundle from PC. Telegram MTProto LIBRARY IPv6 selection = verify at first boot (`/health/ready` Telegram connected).
 * **T14 gates:** pytest 126 + npm lint/typecheck/test/build green on Python 3.13.0 / Node 20.19.5; advisories recorded; RELEASE_SHA pending owner merge + tag.
 * **T12.2 gates:** pytest 127 + npm lint/typecheck/test/build green on Python 3.13.0 / Node 20.19.5; production npm advisories recorded; RELEASE_SHA pending owner merge + tag.
-* **Release SHA:** re-freeze deferred until owner completes T12.3 local acceptance testing; owner re-points tag `v1.0-rc` to the accepted merge commit; VPS must checkout the new SHA before deploy.
+* **T12.4 gates:** pytest 143 + npm lint/typecheck/test/build green on Python 3.13.0 / Node 20.19.5; deployment paused.
+* **Release SHA:** deployment paused; re-freeze deferred until T12.4 merges and the owner re-points tag `v1.0-rc`; VPS must checkout the new SHA before deploy.
 * **VPS:** NeoHeberg LXC, Debian 13 trixie, 512MB RAM + 512MB swap, ~3.1GB free disk; Python 3.13 native (explicit decision 2026-11-19).
 * **Neon backup verified + off-host:** PENDING (T0)
 * **Session backup:** PENDING (T0; after first boot if fresh install)
@@ -87,7 +89,8 @@
 * `2026-11-19 | T14 | clean-checkout gates green (pytest 126; npm lint/typecheck/test/build); pip check + advisory scan recorded; hygiene clean; MediaPlayer frozen; Phase R final recorded`
 * `2026-11-19 | T12.2 | fixed batch-delete tuple→JSONResponse (200/207) + regression test; uvicorn --no-access-log to stop signed-URL logging; gates re-run green`
 * `2026-11-19 | T12.3 | pytest 132 + compileall/pip check and npm lint/typecheck/test/build green; 10 playback speeds; DB connection failures return 503; owner local acceptance pending`
+* `2026-11-19 | T12.4 | DB-wake upload UX + server_status button + frontend 503 guidance + stream producer cleanup; gates green (143 pytest, 14 frontend)`
 
-**T0 status:** ON HOLD pending T12.3 owner acceptance and release re-freeze. Do not run backups until the owner resumes T0.
+**T0 status:** ON HOLD pending T12.4 merge and release re-freeze. Do not run backups until the owner resumes T0.
 
 **Note:** T0 is REQUIRED before the FIRST production boot (not before T2 — that dev work already shipped under its own gates). Agent never creates/merges PRs; owner merges after reading the agent report.

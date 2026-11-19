@@ -5,7 +5,7 @@
 Task IDs continue the repo's T-numbering (T12.1 and T16 are new). One task = one branch = one Copilot prompt = ONE final commit = one owner-merged PR.
 
 ## Constraints & Rules (apply to every task)
-* **Frozen:** `web/src/components/MediaPlayer.tsx` byte-identical except for the one-time T12.3 owner-authorized SPEEDS constant change (and minimal speed-chip layout only if required); preserve its imports (`TelegramFile`, `formatDuration`, `useUpdateProgress`, `useFile`, `api`, `useAppStore`) and keys `hearth_player_prefs`, `hearth_device_id`. Freeze resumes after T12.3.
+* **Frozen:** `web/src/components/MediaPlayer.tsx` byte-identical for T12.4 onward; the one-time T12.3 owner-authorized SPEEDS exception is closed. Preserve its imports (`TelegramFile`, `formatDuration`, `useUpdateProgress`, `useFile`, `api`, `useAppStore`) and keys `hearth_player_prefs`, `hearth_device_id`.
 * **Non-goals:** Android, folders, search, multi-select, rename/move, QR, public links, transcoding, Redis, Docker, SQLite, helper bots, Alembic (today), broad dependency upgrades.
 * **Sanitizer notice:** filename sanitizer and `escape_like` are CORRECT — never alter or "repair".
 * One Uvicorn worker; Python 3.13 (Debian 13 native; decision in HANDOFF); Node 20; `npm ci`; pinned `requirements.txt`.
@@ -208,6 +208,23 @@ Playback compatibility investigation is documentation-only; do not change playba
 
 **Gate:** full backend pytest, `compileall -q app`, `pip check`; frontend `npm ci`, lint, typecheck, test, build; verify all ten speeds are accepted/persisted/applied and speed stepping fallback index 2 remains 1×; MediaPlayer diff limited to `SPEEDS` (+ optional minimal chip-row layout); `git diff --stat` limited to authorized files.
 **Commit:** `T12.3: Login message polish, 10 playback speeds, DB-outage 503 — gate passed`
+
+## T12.4 — DB-wake upload UX, status button, 503 guidance, stream cleanup
+
+**Final version for 2026-11-19.** T12.5 is RESERVED for findings from the owner's external review arriving 2026-11-20; if none, T12.4 remains final.
+
+**Branch:** `hearth/t12.4` from merged T12.3. **Files (exact):**
+* `backend/app/bot.py` — initialize upload `forwarded`, catch DB-connectivity failures from upload and `/start`, preserve Telegram compensation, and add an AUTH_USERS-authorized DB status callback before the existing DB-backed callback gate.
+* `backend/app/streaming.py` — minimal producer cancellation/await cleanup and exception-retrieving done callback.
+* `backend/tests/` — bot DB-wake and callback cases; stream early-close/disconnect cleanup regression.
+* `web/src/lib/api.ts` — exact guidance for HTTP 503 or `SERVICE_UNAVAILABLE`.
+* `web/src/lib/__tests__/api.test.ts` — 503 guidance regression case.
+* `PLAN.md`, `PROGRESS.md`, `AUDIT_REPORT.md` — task, status, and fresh evidence.
+
+`MediaPlayer.tsx` is frozen again. Do not change `main.py`, `App.tsx`, `FileBrowser.tsx`, auth, routers, or dependencies.
+
+**Gate:** full backend pytest, `compileall -q app`, `pip check`; frontend `npm ci`, lint, typecheck, test, build; verify `_redirects`; MediaPlayer diff empty; `git diff --stat` limited to authorized files.
+**Commit:** `T12.4: DB-wake upload UX + server status button + stream cleanup — gate passed`
 
 ## T0 — Verified Backups (OWNER, BEFORE first production boot; agent may assist)
 

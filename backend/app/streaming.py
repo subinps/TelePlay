@@ -67,6 +67,15 @@ class MessageGone(Exception):
     """The storage-channel message no longer exists. Safe to clean up the row."""
 
 
+def _retrieve_task_exception(task: asyncio.Task) -> None:
+    if task.cancelled():
+        return
+    try:
+        task.exception()
+    except asyncio.CancelledError:
+        pass
+
+
 def _sem(c_idx: int) -> asyncio.Semaphore:
     if c_idx not in _semaphores:
         _semaphores[c_idx] = asyncio.Semaphore(
@@ -263,6 +272,7 @@ async def stream_file(
             await _q.put(done_flag)
 
         task = asyncio.create_task(produce())
+        task.add_done_callback(_retrieve_task_exception)
         try:
             while True:
                 item = await queue.get()
@@ -293,8 +303,10 @@ async def stream_file(
         finally:
             task.cancel()
             try:
-                await asyncio.wait_for(asyncio.shield(task), timeout=2.0)
-            except (TimeoutError, asyncio.CancelledError):
+                await asyncio.wait_for(task, timeout=2.0)
+            except asyncio.CancelledError:
+                pass
+            except TimeoutError:
                 pass
             except Exception:
                 pass

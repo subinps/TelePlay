@@ -291,12 +291,20 @@ export function errorMessage(
   fallback = "Something went wrong. Please try again.",
 ): string {
   const d = errorDetail(e);
+  const s = errorStatus(e);
+  if (
+    s === 503 ||
+    (d &&
+      typeof d === "object" &&
+      (d as { code?: unknown }).code === "SERVICE_UNAVAILABLE")
+  ) {
+    return "Server is waking up or temporarily down. Please try again in about 30 seconds.";
+  }
   if (typeof d === "string" && d && d !== "Not Found") return d;
   if (d && typeof d === "object") {
     const m = (d as { message?: string }).message;
     if (typeof m === "string" && m) return m;
   }
-  const s = errorStatus(e);
   if (s === 401) return "Your sign-in expired. Please sign in again.";
   if (s === 403) return "Only the family account can do that.";
   if (s === 404) return "That item is no longer in the library.";

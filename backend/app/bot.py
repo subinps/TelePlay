@@ -14,9 +14,11 @@ Production features:
 - Help, paginated /myfiles, full /file <id> metadata.
 """
 
+import asyncio
 import os
 import re
 import secrets
+import socket
 import time
 import logging
 from datetime import datetime, timedelta
@@ -29,7 +31,8 @@ from pyrogram.types import (
     Message,
     WebAppInfo,
 )
-from sqlalchemy import select
+from sqlalchemy import select, text
+from sqlalchemy.exc import DBAPIError, InterfaceError, OperationalError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from .auth import hash_pin, revoke_guest_tokens
@@ -64,6 +67,34 @@ MYFILES_PAGE_SIZE = 10
 
 # Callback actions that mutate state and require the owner (admin_telegram_id).
 DESTRUCTIVE_CALLBACKS = {"confirmdelfile", "logout_all_confirm", "kick", "user_remove"}
+_DB_CONNECTIVITY_ERRORS = (
+    OperationalError,
+    DBAPIError,
+    InterfaceError,
+    TimeoutError,
+    socket.gaierror,
+    ConnectionError,
+    OSError,
+)
+_DB_WAKING_MESSAGE = (
+    "⚠️ **Couldn't save your file**\n\n"
+    "The database may be waking up or temporarily down "
+    "(it sleeps after a few minutes of inactivity).\n\n"
+    "Please wait ~30 seconds, send /start, then forward the file again."
+)
+
+
+async def _reply_db_waking(
+    target: Message,
+    *,
+    edit: bool = False,
+    message: str = _DB_WAKING_MESSAGE,
+) -> None:
+    markup = InlineKeyboardMarkup(
+        [[InlineKeyboardButton("🩺 Check Server Status", callback_data="server_status")]]
+    )
+    send = target.edit if edit else target.reply
+    await send(message, reply_markup=markup)
 
 
 def format_size(size_bytes: int) -> str:
@@ -230,12 +261,17 @@ async def check_auth(client, message: Message):
 @tg_client.on_message(filters.command("start") & filters.private)
 async def start_command(client, message: Message):
     """Handle /start and /start CODE commands."""
-    await get_or_create_user(
-        message.from_user.id,
-        message.from_user.username,
-        message.from_user.first_name,
-        message.from_user.last_name,
-    )
+    try:
+        await get_or_create_user(
+            message.from_user.id,
+            message.from_user.username,
+            message.from_user.first_name,
+            message.from_user.last_name,
+        )
+    except _DB_CONNECTIVITY_ERRORS as exc:
+        logger.warning("Start command database failure (%s)", type(exc).__name__)
+        await _reply_db_waking(message)
+        return
 
     if len(message.command) > 1:
         code_input = message.command[1].strip().upper()
@@ -758,13 +794,6 @@ async def handle_file(client, message: Message):
     - If DB insert fails, DELETE the forwarded Telegram message (compensation)
     - This prevents orphaned Telegram messages when DB is unavailable
     """
-    user = await get_or_create_user(
-        message.from_user.id,
-        message.from_user.username,
-        message.from_user.first_name,
-        message.from_user.last_name,
-    )
-
     if message.video:
         media = message.video
     elif message.audio:
@@ -779,8 +808,15 @@ async def handle_file(client, message: Message):
     file_type = detect_file_type(message, media)
 
     status_msg = await message.reply("📥 Processing file...")
+    forwarded = None
 
     try:
+        user = await get_or_create_user(
+            message.from_user.id,
+            message.from_user.username,
+            message.from_user.first_name,
+            message.from_user.last_name,
+        )
         forwarded = await forward_to_storage_channel(message)
         if not forwarded:
             await status_msg.edit("❌ Failed to forward file to storage channel.")
@@ -850,20 +886,35 @@ async def handle_file(client, message: Message):
 
     except Exception as e:
         # DB insert failed — delete the forwarded Telegram message to prevent orphan
+        db_waking = isinstance(e, _DB_CONNECTIVITY_ERRORS)
+        if db_waking:
+            logger.warning("File upload database failure (%s)", type(e).__name__)
+
         if forwarded:
             delete_ok = await delete_from_storage_channel(forwarded.id)
             if delete_ok:
-                await status_msg.edit(
-                    "❌ **Database error**\n\n"
-                    "Failed to save file metadata. The file has been removed from the "
-                    "storage channel. Please try again later."
-                )
+                if db_waking:
+                    await _reply_db_waking(status_msg, edit=True)
+                else:
+                    await status_msg.edit(
+                        "❌ **Database error**\n\n"
+                        "Failed to save file metadata. The file has been removed from the "
+                        "storage channel. Please try again later."
+                    )
             else:
-                await status_msg.edit(
+                cleanup_message = (
                     "❌ **Database and Telegram error**\n\n"
                     "Failed to save file metadata, and failed to remove the orphaned "
                     "Telegram message. An admin will need to manually clean up."
                 )
+                if db_waking:
+                    await _reply_db_waking(
+                        status_msg, edit=True, message=cleanup_message
+                    )
+                else:
+                    await status_msg.edit(cleanup_message)
+        elif db_waking:
+            await _reply_db_waking(status_msg, edit=True)
         else:
             await status_msg.edit(f"❌ Failed to process file: {e!s}")
 
@@ -877,6 +928,32 @@ async def handle_callback(client, callback: CallbackQuery):
     """Handle inline keyboard button presses."""
     data = callback.data or ""
     sender_id = callback.from_user.id
+
+    if data == "server_status":
+        if sender_id not in settings.auth_users:
+            await callback.answer("Unauthorized", show_alert=True)
+            return
+
+        async def probe_database():
+            async with async_session() as db:
+                await db.execute(text("SELECT 1"))
+
+        try:
+            await asyncio.wait_for(probe_database(), timeout=8)
+        except Exception as exc:
+            logger.warning(
+                "Server status database probe failed (%s)", type(exc).__name__
+            )
+            await callback.answer(
+                "⏳ Still waking up — please try again in ~30 seconds.",
+                show_alert=True,
+            )
+        else:
+            await callback.answer(
+                "✅ Server is up — database ready. Please re-forward your file.",
+                show_alert=True,
+            )
+        return
 
     # ═══ Callback auth gate (P1-03) ═══
     # Every callback requires an active family membership. Destructive actions

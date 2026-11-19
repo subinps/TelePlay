@@ -5,6 +5,7 @@ import {
   ACCESS_KEY,
   REFRESH_KEY,
   api,
+  errorMessage,
   fetchMe,
   loginWithCode,
   logout,
@@ -62,6 +63,28 @@ describe("api contracts (T8)", () => {
     } as never);
 
     await expect(fetchMe()).resolves.toBeNull();
+  });
+
+  it("maps SERVICE_UNAVAILABLE responses to database wake-up guidance", () => {
+    const guidance =
+      "Server is waking up or temporarily down. Please try again in about 30 seconds.";
+
+    expect(
+      errorMessage({
+        response: {
+          status: 503,
+          data: { code: "SERVICE_UNAVAILABLE", message: "Unavailable" },
+        },
+      }),
+    ).toBe(guidance);
+    expect(
+      errorMessage({
+        response: {
+          status: 500,
+          data: { detail: { code: "SERVICE_UNAVAILABLE" } },
+        },
+      }),
+    ).toBe(guidance);
   });
 
   it("parses retry_after_seconds from a 429 login response", async () => {
