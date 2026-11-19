@@ -159,8 +159,8 @@ function LoginScreen({
           }
           const crossMode =
             mode === "family"
-              ? "That code is invalid or expired. A 6-digit PIN is for Guest login."
-              : "That PIN is invalid or expired. An 8-digit code is for Family login.";
+              ? "This code is invalid or expired. Get a new code from the bot and try again — or switch to Guest login."
+              : "This PIN is invalid or expired. Get a new Guest PIN and try again — or switch to Family login.";
           setMessage(result.error === "AUTH_FAILED" ? crossMode : result.message);
           setDigits("");
           requestAnimationFrame(() => keys.current[0]?.focus());

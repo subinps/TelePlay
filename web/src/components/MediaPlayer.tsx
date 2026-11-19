@@ -84,7 +84,7 @@ type IconType = typeof Crop;
 interface Prefs { volume: number; muted: boolean; rate: number; aspect: Aspect; subtitleLang: string }
 type MutableRef<T> = { current: T | null };
 
-const SPEEDS: readonly number[] = [0.5, 0.75, 1, 1.25, 1.5, 1.75, 2];
+const SPEEDS: readonly number[] = [0.5, 0.75, 1, 1.1, 1.2, 1.25, 1.35, 1.5, 1.75, 2];
 const ASPECT_ORDER: Aspect[] = ['fit', 'fill', 'stretch'];
 const ASPECT_META: Record<Aspect, { label: string; hint: string; icon: IconType }> = {
     fit: { label: 'Fit', hint: 'Whole picture', icon: RectangleHorizontal },
