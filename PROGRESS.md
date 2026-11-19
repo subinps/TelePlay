@@ -5,7 +5,7 @@
 * **Audited Code Baseline:** `84926670051242bbbcd5afae378aa6f319ded062` (main; T1–T12 merged via PR #16; full static audit 2026-11-19)
 * **Historical Dev Baseline:** `5f0d769d7c8c143f27e419da90622505d153bcf0` (T1–T12 era; see git history)
 * **Active Branch:** `main` (task work on `hearth/<task-id>` branches; owner creates + merges PRs)
-* **Current Task:** `T12.1` — Pre-deploy Audit & Surgical Workflow Fixes
+* **Current Task:** `T13` — Production Deployment Kit & Runbooks
 * **Release SHA:** frozen at end of T14 (tag `v1.0-rc`) — see Deployment Readiness below
 
 ---
@@ -25,7 +25,7 @@
 * [x] **T10** — File Browser & Confirmation Modals (`FileBrowser.tsx` Done/Esc/Tizen Back, `DeleteConfirmModal.tsx`)
 * [x] **T11** — Context Menu & Device Fingerprinting (`GlobalContextMenu.tsx`, `Toasts.tsx`, `device.ts`)
 * [x] **T12** — Toolchain & Repository Hygiene (`package.json`, `.eslintrc.cjs`, `tsconfig.json`, delete dead files)
-* [ ] **T12.1** — Pre-deploy Audit & Surgical Workflow Fixes (`main.py` sync gate, `bot.py` sync guard + `/help`, `gate4_check.py`, `smoke_db.py`, tests, `AUDIT_REPORT.md`) — NEW 2026-11-19
+* [x] **T12.1** — Pre-deploy Audit & Surgical Workflow Fixes (`main.py` sync gate, `bot.py` sync guard + `/help`, `gate4_check.py`, `smoke_db.py`, tests, `AUDIT_REPORT.md`) — NEW 2026-11-19
 * [ ] **T13** — Production Deployment Kit & Runbooks (`deploy/hearth.service`, `deploy/Caddyfile`, `deploy/backup-neon.sh`, `deploy/duckdns-update.sh`, `deploy/README.md`, `README.md`, historical doc banners)
 * [ ] **T14** — Comprehensive Test Suite & Final Hygiene (fresh clean-checkout gates, advisory review, hygiene greps, evidence, tag `v1.0-rc` → RELEASE_SHA)
 * [ ] **T15** — Real-World Hardware Acceptance (Phase R + runbook deploy + Samsung TV + 512MB VPS matrix; every P0 row PASS)
@@ -35,7 +35,8 @@
 
 ## Deployment Readiness (owner fills as evidence lands)
 
-* **Phase R (NeoHeberg reachability):** PENDING — IPv4 inbound? IPv6-only? TV IPv6 score? → decides DuckDNS A vs AAAA
+* **Phase R (NeoHeberg reachability):** CLIENTS CONFIRMED 2026-11-19 (TV + laptop). VPS server-side PENDING (curl -4/-6 + inbound AAAA test at T15). Expected path: DuckDNS AAAA.
+* **VPS:** NeoHeberg LXC, Debian 13 trixie, 512MB RAM + 512MB swap, ~3.1GB free disk; Python 3.13 native (explicit decision 2026-11-19).
 * **Neon backup verified + off-host:** PENDING (T0)
 * **Session backup:** PENDING (T0; after first boot if fresh install)
 * **RELEASE_SHA (frozen at T14):** TBD
@@ -75,5 +76,6 @@
 * `2026-11-18 | T11 | npm typecheck + test green (GlobalContextMenu blob leak fixed via LRU eviction, dead folder code removed, Toasts timer cleanup verified, device ID stability confirmed)`
 * `2026-11-18 | T12 | npm typecheck + lint + build green, pytest green (deleted dead Docker/tv.py/patch.py files, added ESLint config, fixed TSConfig deprecation)`
 * `2026-11-19 | PLAN | docs re-baseline: HANDOFF/PLAN/PROGRESS v2 for deploy run (T12.1→T16); full static audit of baseline 8492667 completed (120 tests counted, compileall PASS, contracts verified); owner-committed, docs only`
+* `2026-11-19 | T12.1 | pytest 126 passed; compileall PASS; pip check PASS; npm ci/lint/typecheck/test/build all green (13 frontend tests); docs environment deltas applied`
 
 **Note:** T0 is REQUIRED before the FIRST production boot (not before T2 — that dev work already shipped under its own gates). Agent never creates/merges PRs; owner merges after reading the agent report.

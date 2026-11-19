@@ -8,7 +8,7 @@ Task IDs continue the repo's T-numbering (T12.1 and T16 are new). One task = one
 * **Frozen:** `web/src/components/MediaPlayer.tsx` byte-identical; preserve its imports (`TelegramFile`, `formatDuration`, `useUpdateProgress`, `useFile`, `api`, `useAppStore`) and keys `hearth_player_prefs`, `hearth_device_id`.
 * **Non-goals:** Android, folders, search, multi-select, rename/move, QR, public links, transcoding, Redis, Docker, SQLite, helper bots, Alembic (today), broad dependency upgrades.
 * **Sanitizer notice:** filename sanitizer and `escape_like` are CORRECT — never alter or "repair".
-* One Uvicorn worker; Python 3.11; Node 20; `npm ci`; pinned `requirements.txt`.
+* One Uvicorn worker; Python 3.13 (Debian 13 native; decision in HANDOFF); Node 20; `npm ci`; pinned `requirements.txt`.
 * Playback cap is **household-wide 2** (already implemented — do not change the limiter).
 * Full operating rules: see `HANDOFF.md`. Agent never creates/merges PRs; owner merges.
 
@@ -43,6 +43,7 @@ T1 deps/env template · T2 schema truth (String(10), guest default, family_membe
 * `backend/tests/` — add: sync flag off → no sync task/call; guard aborts mass-gone without deleting; `/help` lists all commands. Extend existing files (or one new test file). Never weaken existing tests.
 * `AUDIT_REPORT.md` (NEW, repo root) — record the 2026-11-19 static audit at baseline: commit/date/auditor, executive summary, critical issues (= pre-fix F1–F5 state), verification tables (T12 deletions all DELETED; no broken imports; backend/frontend contracts verified; 120 tests; security scan clean; PROGRESS state), recommendation "PROCEED AFTER T12.1", next steps.
 * `PROGRESS.md` — tick T12.1, Current Task → T13, log line; record Phase R answer if owner provided it.
+* T12.1 file list: append "(+ HANDOFF/PLAN/PROGRESS environment deltas per owner instruction 2026-11-19)".
 
 **Do NOT touch:** anything else. No frontend changes. MediaPlayer untouched. Do not "fix" Verified Baseline Facts (HANDOFF).
 **Gate:** full `pytest -q` (≥120 + new, all green) · `compileall -q app` · `npm ci && npm run lint && npm run typecheck && npm test && npm run build` (prove no regression) · MediaPlayer diff empty.
@@ -159,7 +160,7 @@ resp="$(curl -fsS "https://www.duckdns.org/update?domains=${DUCKDNS_DOMAIN}&toke
 
 ### deploy/README.md — full runbook containing, in order:
 1. Prerequisites + Phase R reachability gate (IPv4 vs IPv6 decision tree from HANDOFF).
-2. VPS prep: `apt install python3.11 python3.11-venv git curl ca-certificates caddy ufw`; PGDG `postgresql-client-17` (match Neon major); `adduser --system --group --home /var/lib/hearth hearth`; directories per HANDOFF canon with exact owners/modes.
+2. VPS prep: `sudo apt install -y python3 python3-venv python3-dev build-essential git curl ca-certificates caddy ufw`; PGDG supports trixie; install `postgresql-client-<major matching Neon server>` (17 or 18 — check the Neon console). Create the venv with `python3 -m venv .venv`; replace any python3.11 commands in this runbook text.
 3. Checkout RELEASE_SHA (`git checkout --detach <SHA>`; `git rev-parse HEAD` must match); venv + pinned install + `pip check`.
 4. `/etc/hearth/hearth.env` template (0640 root:hearth): TELEGRAM_API_ID/API_HASH/BOT_TOKEN/STORAGE_CHANNEL_ID, AUTH_USERS (owner FIRST), JWT_SECRET (`secrets.token_hex(32)`), DATABASE_URL (pooled `postgresql+asyncpg://…-pooler…?sslmode=require`), WEB_BASE_URL + CORS_ORIGINS (exact Pages origin), TELEGRAM_SESSION_DIR=/var/lib/hearth/session, SERVER_HOST=127.0.0.1, SERVER_PORT=8000, LOG_LEVEL=INFO, MAX_PLAYBACK_DEVICES=2, PLAYBACK_HEARTBEAT_SECONDS=20, PLAYBACK_SESSION_TTL_SECONDS=75, TELEGRAM_CLIENT_CONCURRENCY=2, SYNC_ON_STARTUP=false, SYNC_BATCH_SIZE=100, GUEST_PIN_HOURS=24, LOGIN_ATTEMPT_LIMIT=5, LOGIN_ATTEMPT_WINDOW_SECONDS=3600, TELEGRAM_HELPER_BOT_TOKENS= (empty).
 5. T0 backups BEFORE first boot (run backup-neon.sh, verify, copy off-VPS; session tar if exists; restore procedure).
@@ -177,7 +178,7 @@ resp="$(curl -fsS "https://www.duckdns.org/update?domains=${DUCKDNS_DOMAIN}&toke
 
 **Branch:** `hearth/t14` from main (after T13 merge). Run everything from a CLEAN checkout:
 ```
-cd backend && python3.11 -m venv .venv
+cd backend && python3.13 -m venv .venv
 .venv/bin/pip install -r requirements-dev.txt
 .venv/bin/python -m pytest -q            # record exact count
 .venv/bin/python -m compileall -q app
@@ -187,6 +188,7 @@ npm run lint && npm run typecheck && npm test && npm run build
 npm audit --omit=dev                     # review + record; NO audit fix --force
 ```
 * Review Python advisories (python-jose 3.3.0, fastapi 0.115.5, …) — record, do NOT blind-upgrade.
+* Production-interpreter gate: backend suite must ALSO pass on Python 3.13. If the dev machine lacks 3.13, record the version used and mark the 3.13 gate PENDING; it then runs at T15 entry on the VPS in a TEMP venv (requirements-dev.txt, full pytest -q) which is DELETED before the production venv/service goes live. Production venv stays runtime-only.
 * Hygiene greps: no folder/QR/logout-all legacy artifacts in active code; `git ls-files` contains no `.env`/sessions/dumps/media; `dist/_redirects` exists; MediaPlayer byte-identical.
 * Append "Fresh gate evidence" section to `AUDIT_REPORT.md` (commands, counts, versions, date, SHA tested).
 * Tag `v1.0-rc` on the final commit. Report the SHA — **owner records it as RELEASE_SHA in PROGRESS → Deployment Readiness when merging.** Deploy only this SHA.
@@ -206,6 +208,9 @@ Re-scoped: the old "before T2" wording is historical (dev schema work already ga
 
 Entry gate: Phase R answered; T0 verified; RELEASE_SHA frozen. Deploy per `deploy/README.md`, then record PASS/FAIL + measurements for EVERY row (P0 = all):
 * [ ] Phase R reachability proven from the TV itself (A or AAAA path).
+* [ ] Server-side Phase R — run `curl -4/-6` on the VPS, require global IPv6, update the DuckDNS AAAA record, then from the TV browser open `https://<domain>/health` and expect 404 (proves inbound reachability and proxy).
+* [ ] Effective memory limit check — run `systemctl show hearth -p MemoryMax,MemoryHigh`; if infinity, the limit is host-enforced, note it and rely on monitoring.
+* [ ] Firewall fallback — use ufw if supported, otherwise the provider firewall; in both cases, an external `:8000` refused test must pass.
 * [ ] Clean VPS deployment step-by-step from runbook; `caddy validate` before reload.
 * [ ] gate4 security gate: fresh 8-digit code → authorized range 206; **unauthorized warm-cache 401, zero bytes**.
 * [ ] Forward disposable ~1GB MP4 (H.264+AAC) → appears FIRST in All videos; metadata correct.

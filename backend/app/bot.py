@@ -18,6 +18,7 @@ import os
 import re
 import secrets
 import time
+import logging
 from datetime import datetime, timedelta
 
 from pyrogram import filters
@@ -43,6 +44,7 @@ from .telegram import (
 )
 
 settings = get_settings()
+logger = logging.getLogger(__name__)
 
 # Video extensions for file type detection
 VIDEO_EXTS = {
@@ -269,7 +271,7 @@ async def start_command(client, message: Message):
         "━━━━━━━━━━━━━━━━━━━━\n"
         "1️⃣ Forward any media file to upload\n"
         "2️⃣ Use /web to open web player\n"
-        "3️⃣ Use /login on your TV app\n\n"
+        "3️⃣ Use /login on your TV app (Family code: 8 digits, one-time, 5 minutes)\n\n"
         "━━━━━━━━━━━━━━━━━━━━\n"
         "📝 **COMMANDS**\n"
         "━━━━━━━━━━━━━━━━━━━━\n"
@@ -302,38 +304,40 @@ async def help_command(client, message: Message):
         "• /help - This help guide\n"
         "• /web - Get authenticated web link\n"
         "• /login - Get/verify login code for TV\n"
-        "• /logout_all - Invalidate all active sessions\n"
-        "• /sync - Clean up dead links (Admin only)\n\n"
+        "• /logout_all - Invalidate all active sessions (Owner only)\n"
+        "• /sync - Clean up dead links (Owner only)\n\n"
         "━━━━━━━━━━━━━━━━━━━━\n"
         "📁 **FILE MANAGEMENT**\n"
         "━━━━━━━━━━━━━━━━━━━━\n"
-        "• /myfiles - Recent library files with IDs (paginated)\n"
-        "• /file `<id>` - Full metadata and Delete for a file\n\n"
+        "• /myfiles - Recent library files with IDs (Family)\n"
+        "• /file `<id>` - Full metadata and Delete for a file (Family)\n\n"
         "━━━━━━━━━━━━━━━━━━━━\n"
-        "👥 **FAMILY MANAGEMENT** (Owner only)\n"
+        "👥 **FAMILY MANAGEMENT**\n"
         "━━━━━━━━━━━━━━━━━━━━\n"
-        "• /users - List active family members with owner flag\n"
-        "• /user_add `<telegram_id>` - Add a family member as admin\n"
-        "• /user_remove `<telegram_id>` - Remove member and kill sessions\n\n"
+        "• /users - List active family members with owner flag (Owner only)\n"
+        "• /user_add `<telegram_id>` - Add a family member as admin (Owner only)\n"
+        "• /user_remove `<telegram_id>` - Remove member and kill sessions (Owner only)\n\n"
         "━━━━━━━━━━━━━━━━━━━━\n"
-        "▶️ **PLAYBACK** (Owner only)\n"
+        "▶️ **PLAYBACK**\n"
         "━━━━━━━━━━━━━━━━━━━━\n"
-        "• /sessions - List active playback sessions\n"
-        "• /kick `<device_id>` - Kick a playback device\n\n"
+        "• /sessions - List active playback sessions (Owner only)\n"
+        "• /kick `<device_id>` - Kick a playback device (Owner only)\n\n"
         "━━━━━━━━━━━━━━━━━━━━\n"
         "🎟 **GUEST**\n"
         "━━━━━━━━━━━━━━━━━━━━\n"
-        "• /guest - Generate a Guest PIN (Admin only)\n"
-        "• /guest status - Show current PIN state and expiry\n"
-        "• /guest off - Disable Guest access\n\n"
+        "• /guest - Generate a Guest PIN (Owner only)\n"
+        "• /guest status - Show current PIN state and expiry (Owner only)\n"
+        "• /guest off - Disable Guest access (Owner only)\n"
+        "• Guests are watch-only: no add or delete.\n\n"
+        "🔐 **LOGIN EXPIRY**\n"
+        "━━━━━━━━━━━━━━━━━━━━\n"
+        "• Family login code: 8 digits, ONE-TIME, valid 5 minutes (/login)\n"
+        "• Guest PIN: 6 digits, valid 24 hours (/guest)\n\n"
         "━━━━━━━━━━━━━━━━━━━━\n"
         "📁 **SUPPORTED FILES**\n"
         "━━━━━━━━━━━━━━━━━━━━\n"
-        "• 🎬 Videos: MP4, MKV, AVI, MOV, WEBM\n"
-        "• 🎵 Audio: MP3, FLAC, AAC, OGG, WAV\n"
-        "• 🖼 Images: JPG, PNG, GIF, WEBP\n"
-        "• 📄 Documents: PDF, TXT, DOCX, etc.\n"
-        "• ⚠️ Max size: 2GB per file\n"
+        "• Videos, audio and documents (max 2 GB per file)\n"
+        "• Photos sent as photos are not supported.\n"
     )
 
 
@@ -705,6 +709,7 @@ async def sync_with_channel() -> int:
     async with async_session() as db:
         rows = (await db.execute(select(File))).scalars().all()
         gone = []
+        alive_count = 0
         for i in range(0, len(rows), 100):
             batch = rows[i : i + 100]
             msgs = await tg_client.get_messages(
@@ -712,7 +717,16 @@ async def sync_with_channel() -> int:
                 [r.channel_message_id for r in batch],
             )
             alive = {m.id for m in msgs if m and not getattr(m, "empty", False)}
+            alive_count += len(alive)
             gone += [r for r in batch if r.channel_message_id not in alive]
+
+        if rows and (alive_count == 0 or len(gone) > 0.30 * len(rows)):
+            logger.warning(
+                "Sync safety guard: %d/%d rows appear gone — aborting without deletes",
+                len(gone),
+                len(rows),
+            )
+            return 0
 
         for r in gone:
             await db.delete(r)

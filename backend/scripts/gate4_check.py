@@ -1,6 +1,6 @@
 """Gate 4 — live warm-cache security check.
 Usage:  python scripts/gate4_check.py <LOGIN_CODE>
-Get LOGIN_CODE by sending /login to your Telegram bot (it replies with a 6-char code).
+Get LOGIN_CODE by sending /login to your Telegram bot (it replies with an 8-digit code).
 Backend must be running on 127.0.0.1:8000.
 """
 import json
