@@ -76,7 +76,10 @@ async def lifespan(app: FastAPI):
         raise  # Fatal - app won't start without main bot
     
     # 3. Start supervised sync task (best-effort, errors logged but not fatal)
-    _sync_task = asyncio.create_task(_supervised_sync(), name="sync_task")
+    if settings.sync_on_startup:
+        _sync_task = asyncio.create_task(_supervised_sync(), name="sync_task")
+    else:
+        logger.info("Startup sync disabled (SYNC_ON_STARTUP=false)")
     
     yield
     

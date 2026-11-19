@@ -1,17 +1,9 @@
-"""Run from backend/ with your real .env (Neon):  python scripts/smoke_db.py"""
+"""Run from backend/ with your real .env (Neon): python scripts/smoke_db.py"""
 import asyncio
 import sys
 from pathlib import Path
 
-# Make `app` importable when this file is run directly.
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
-
-from sqlalchemy import text
-
-"""Run from backend/ with your real .env (Neon):  python scripts/smoke_db.py"""
-
-from app.database import engine
-import asyncio
 
 from sqlalchemy import text
 

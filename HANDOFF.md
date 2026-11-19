@@ -22,7 +22,7 @@ This v2 handoff supersedes the T12-era handoff for ALL remaining work.
 6. **Gate Verification Required:** Run the task's Gate from `PLAN.md` yourself before committing. Never weaken or delete an existing security test to make a suite pass. Cross-platform note: `caddy validate` / `systemd-analyze verify` may not exist on the dev machine — run them if available, otherwise do a documented static review; live validation is MANDATORY on the VPS in T15 before reload.
 7. **Atomic Commit & Progress Update:** On green gates: tick the task box in `PROGRESS.md`, set `Current Task` to the next task, append ONE log line. Stage only the task's exact files + `PROGRESS.md` (+ `AUDIT_REPORT.md` where the task says so).
 8. **Scope Boundary Check:** If you must touch any file outside the task's explicit file list in `PLAN.md`, STOP and report why before changing anything.
-9. **Deployment Resource Constraints:** 512 MB RAM Debian 12 VPS, Python 3.11, `uvicorn --workers 1` (playback slots, rate limits, caches, Telegram clients are process-local). Neon PostgreSQL only (no SQLite). No Docker, no Redis, no helper bots, no Alembic on deploy day. Pinned `requirements.txt`; `npm ci` (never `npm install`); Node 20 LTS. No broad dependency upgrades.
+9. **Deployment Resource Constraints:** The owner’s actual NeoHeberg server is a Debian 13 (trixie) LXC container on a Proxmox host, with 512 MB RAM, 512 MB swap, and approximately 3.1 GB free disk. Python 3.13 is the explicit production choice because it is native on trixie; pinned dependencies support Python 3.11–3.14. A uv-managed Python 3.11 venv is the fallback only if Python 3.13 gates fail. Run `uvicorn --workers 1` (playback slots, rate limits, caches, and Telegram clients are process-local). Neon PostgreSQL only (no SQLite). No Docker, no Redis, no helper bots, and no Alembic on deploy day. Pinned `requirements.txt`; `npm ci` (never `npm install`); Node 20 LTS. No broad dependency upgrades.
 10. **Publish Before Session End:** Push the task branch to origin. Never leave commits only local.
 11. **Log Format:** `PROGRESS.md` log lines contain NO commit SHA: `YYYY-MM-DD | T<n> | gate result`. `git log` is the authoritative SHA record.
 12. **Single Final Commit:** The task's code, tests, docs and `PROGRESS.md` land in ONE final commit using the exact message given in `PLAN.md`.
@@ -75,6 +75,8 @@ NEXT TASK: <T-id>
 * `Cache-Control: private, no-store` on media must survive the proxy; no CDN caching of API/media.
 * Exact Pages origin in `CORS_ORIGINS`/`WEB_BASE_URL`; `VITE_API_URL` is build-time public — never secrets in any `VITE_*`.
 * Bot-token MTProto sessions re-auth automatically if lost, but still persist + back up the session dir; never run two instances on the same session files.
+* In an LXC, systemd `Memory*` limits may be enforced by the host: verify `systemctl show hearth -p MemoryMax,MemoryHigh`. Treat host-enforced limits separately from service-local measurements.
+* `ufw` or `nftables` may be unavailable on the server. Bind Uvicorn to `127.0.0.1:8000` and use the provider firewall as the primary isolation; an external `:8000 refused` test is the real firewall gate.
 
 ## Phase R — NeoHeberg Reachability Gate (OWNER, run ASAP, before T15 deploy)
 
@@ -84,6 +86,7 @@ NeoHeberg VPS offers include public IPv6; dedicated inbound IPv4 may be a paid o
 2. IPv6-only inbound → open `https://test-ipv6.com` in the **Samsung TV browser**. If TV has working IPv6 → DuckDNS **AAAA** (duckdns script `ipv6=` param) + Caddy (LE validates over IPv6). Proceed.
 3. IPv6-only AND TV lacks IPv6 → STOP. Owner chooses: paid IPv4 option / different host / Cloudflare Tunnel (needs a domain; evaluate video performance/ToS). **No silent architecture switch.**
 Also verify in the NeoHeberg panel: free-VPS renewal policy, firewall (22/80/443), egress fair-use. Record the result in `PROGRESS.md` → Deployment Readiness.
+* 2026-11-19: CLIENT side CONFIRMED — Samsung TV + laptop show working IPv6 (neoheberg.fr/en/ipv6-detector and test-ipv6.com). SERVER side pending: curl -4/-6 on VPS + inbound AAAA test at T15. Expected path: DuckDNS AAAA + Caddy IPv6.
 
 ## Security Invariants (never regress)
 
