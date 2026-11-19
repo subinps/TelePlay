@@ -42,6 +42,7 @@ import logging
 from typing import Optional
 
 from fastapi import APIRouter, Body, Depends, HTTPException, Query, status
+from fastapi.responses import JSONResponse
 from sqlalchemy import func, select
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
@@ -395,7 +396,7 @@ async def batch_delete_files(
     ),
     db: AsyncSession = Depends(get_db),
     admin: User = Depends(require_admin),
-) -> dict[str, object]:
+) -> JSONResponse:
     """
     Delete many files. Family only.
 
@@ -414,12 +415,15 @@ async def batch_delete_files(
     ).scalars().all()
 
     if not files:
-        return {
-            "deleted": [],
-            "failed_telegram": [],
-            "failed_db": [],
-            "message": "No files found to delete",
-        }
+        return JSONResponse(
+            status_code=status.HTTP_200_OK,
+            content={
+                "deleted": [],
+                "failed_telegram": [],
+                "failed_db": [],
+                "message": "No files found to delete",
+            },
+        )
 
     # Map file_id -> file for quick lookup
     file_map = {f.id: f for f in files}
@@ -476,13 +480,16 @@ async def batch_delete_files(
     any_failed = bool(failed_telegram or failed_db)
     status_code = status.HTTP_207_MULTI_STATUS if any_failed else status.HTTP_200_OK
 
-    return {
-        "deleted": deleted,
-        "failed_telegram": failed_telegram,
-        "failed_db": failed_db,
-        "message": (
-            f"Deleted {len(deleted)} file(s)"
-            + (f", {len(failed_telegram)} Telegram failure(s)" if failed_telegram else "")
-            + (f", {len(failed_db)} DB failure(s)" if failed_db else "")
-        ),
-    }, status_code
+    return JSONResponse(
+        status_code=status_code,
+        content={
+            "deleted": deleted,
+            "failed_telegram": failed_telegram,
+            "failed_db": failed_db,
+            "message": (
+                f"Deleted {len(deleted)} file(s)"
+                + (f", {len(failed_telegram)} Telegram failure(s)" if failed_telegram else "")
+                + (f", {len(failed_db)} DB failure(s)" if failed_db else "")
+            ),
+        },
+    )

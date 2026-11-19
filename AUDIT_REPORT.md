@@ -115,3 +115,38 @@ Execute T13 to create the production deployment kit and runbooks.
 **Release status**
 
 Tested SHA = branch tip `56fbf4aa3953c9fc655c254595f7f01d5261f4e1`. After the owner merges the PR, the deployed `RELEASE_SHA` is the merge commit, whose tree is identical to the tested tree. The owner applies tag `v1.0-rc` to that merge commit and records `RELEASE_SHA`. The agent does not tag.
+
+## T12.2 Local-validation findings & fixes
+
+### Findings
+
+- **CRITICAL — CONFIRMED:** `batch_delete_files` returned a `(dict, int)` tuple while its inferred/declared response type was a dict. FastAPI response validation could therefore raise `ResponseValidationError` and return HTTP 500 after the delete had succeeded. Changed the handler to return `JSONResponse` for empty and final results; added an HTTP-level clean-success regression test.
+- **HIGH — CONFIRMED:** Uvicorn access logging could record signed `/api/stream/*?t=` URLs in journald. Added `--no-access-log`; Caddy's existing `skip_log` for `/api/stream/*` remains in place. The runbook documents the intentional logging behavior.
+- **MEDIUM — MONITOR, no code change:** transient `AUTH_KEY_UNREGISTERED` on `upload.GetFile` self-healed through stream retry; main session remained healthy. VPS uses a fresh session.
+
+### Fresh T12.2 gate evidence
+
+**Backend — CONFIRMED**
+
+- `.venv\Scripts\python --version` — **Python 3.13.0**
+- `.venv\Scripts\python -m pytest -q tests/test_files_operations.py -k batch_delete` — **10 passed, 21 deselected**. The all-success HTTP regression specifically returned **200** with the expected `deleted` IDs, empty failure arrays, and `message`.
+- `.venv\Scripts\python -m pytest -q` — **127 passed, 8 warnings**
+- `.venv\Scripts\python -m compileall -q app` — **PASS**
+- `.venv\Scripts\pip check` — **PASS; no broken requirements**
+
+**Frontend — CONFIRMED**
+
+- Node **20.19.5**, npm **10.8.2**; `npm ci` — **PASS**. npm reported 27 total dependency-tree advisories: 1 low, 7 moderate, 17 high, 2 critical.
+- `npm run lint` — **PASS**
+- `npm run typecheck` — **PASS**
+- `npm test` — **2 test files, 13 tests passed**
+- `npm run build` — **PASS**; `dist/_redirects` present
+- Supplemental `npm audit --omit=dev` — **3 production advisories: 1 moderate, 2 high, 0 critical** (`axios`, `follow-redirects`, `form-data`); npm returned nonzero for the findings. No dependency or lockfile changes were made. This audit was supplemental, not one of the specified T12.2 pass/fail gates.
+
+**Deployment and scope — CONFIRMED**
+
+- Static review: `deploy/hearth.service` uses one Uvicorn worker bound to `127.0.0.1:8000` and includes `--no-access-log`; `deploy/Caddyfile` retains `skip_log` for `/api/stream/*`.
+- `git diff --check` — **PASS**
+- `git diff -- web/src/components/MediaPlayer.tsx` — **empty**
+- Exactly the six authorized files are intended for this task; no dependency manifests were changed.
+- **VERIFY ON VPS:** systemd/Caddy live validation; fresh-session Telegram MTProto IPv6 connection at first boot; release deploy must use the owner's re-frozen merge SHA. T0 backups remain on hold.

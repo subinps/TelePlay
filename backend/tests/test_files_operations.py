@@ -14,11 +14,14 @@ Cover:
 - Cache invalidation called after successful delete
 """
 import asyncio
+import json
 from datetime import datetime
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch, ANY
 
 import pytest
+from fastapi import FastAPI
+from fastapi.testclient import TestClient
 from sqlalchemy import select
 
 from app.models import File, User, WatchProgress
@@ -35,6 +38,7 @@ from app.routers.files import (
 )
 from app.schemas import WatchProgressUpdate, BatchDeleteRequest
 from app.auth import require_admin
+from app.database import get_db
 
 
 # ────────────────────────── Test fixtures ────────────────────────────────────
@@ -485,15 +489,15 @@ def test_batch_delete_mixed_results():
 
         with patch("app.routers.files.delete_from_storage_channel", tg.delete_from_storage_channel):
             with patch("app.routers.files.invalidate_meta") as mock_invalidate:
-                result, status_code = await batch_delete_files(
+                response = await batch_delete_files(
                     payload=[1, 2, 3], db=db, admin=user
                 )
 
-        # Check response structure
+        result = json.loads(response.body)
+        assert response.status_code == 207
         assert result["deleted"] == [2]
         assert result["failed_telegram"] == [1]
         assert result["failed_db"] == [3]
-        assert status_code == 207  # Multi-Status
 
         # Cache invalidation only called for successful delete
         mock_invalidate.assert_called_once_with(2, 1002)
@@ -502,28 +506,50 @@ def test_batch_delete_mixed_results():
 
 
 def test_batch_delete_all_success_returns_200():
-    """All files deleted successfully → 200 OK."""
+    """FastAPI returns the successful batch-delete JSON body without validation errors."""
+    db = make_db()
+    db.files[1] = FakeFile(1, 1001, "file1.mp4")
+    db.files[2] = FakeFile(2, 1002, "file2.mp4")
+    user = make_user(user_id=1)
+
+    tg = FakeTelegram()
+    tg.delete_results[1001] = True
+    tg.delete_results[1002] = True
+
+    async def override_get_db():
+        yield db
+
+    app = FastAPI()
+    app.add_api_route("/files/batch-delete", batch_delete_files, methods=["POST"])
+    app.dependency_overrides[get_db] = override_get_db
+    app.dependency_overrides[require_admin] = lambda: user
+
+    with patch("app.routers.files.delete_from_storage_channel", tg.delete_from_storage_channel):
+        with patch("app.routers.files.invalidate_meta") as mock_invalidate:
+            response = TestClient(app).post("/files/batch-delete", json=[1, 2])
+
+    assert response.status_code == 200
+    assert response.json()["deleted"] == [1, 2]
+    assert response.json()["failed_telegram"] == []
+    assert response.json()["failed_db"] == []
+    assert "message" in response.json()
+    assert mock_invalidate.call_count == 2
+
+
+def test_batch_delete_not_found_ids_returns_200():
+    """Unknown IDs return a successful empty JSON response."""
     async def _test():
         db = make_db()
-        db.files[1] = FakeFile(1, 1001, "file1.mp4")
-        db.files[2] = FakeFile(2, 1002, "file2.mp4")
         user = make_user(user_id=1)
 
-        tg = FakeTelegram()
-        tg.delete_results[1001] = True
-        tg.delete_results[1002] = True
+        response = await batch_delete_files(payload=[999], db=db, admin=user)
 
-        with patch("app.routers.files.delete_from_storage_channel", tg.delete_from_storage_channel):
-            with patch("app.routers.files.invalidate_meta") as mock_invalidate:
-                result, status_code = await batch_delete_files(
-                    payload=[1, 2], db=db, admin=user
-                )
-
-        assert result["deleted"] == [1, 2]
+        assert response.status_code == 200
+        result = json.loads(response.body)
+        assert result["deleted"] == []
         assert result["failed_telegram"] == []
         assert result["failed_db"] == []
-        assert status_code == 200
-        assert mock_invalidate.call_count == 2
+        assert result["message"] == "No files found to delete"
 
     asyncio.run(_test())
 
@@ -787,10 +813,12 @@ def test_batch_delete_duplicate_ids_deduplicated():
 
         with patch("app.routers.files.delete_from_storage_channel", tg.delete_from_storage_channel):
             with patch("app.routers.files.invalidate_meta") as mock_invalidate:
-                result, status_code = await batch_delete_files(
+                response = await batch_delete_files(
                     payload=[1, 1, 1], db=db, admin=user
                 )
 
+        result = json.loads(response.body)
+        assert response.status_code == 200
         assert result["deleted"] == [1]
         assert mock_invalidate.call_count == 1
 
@@ -837,13 +865,15 @@ def test_batch_delete_db_rollback_on_failure():
 
         with patch("app.routers.files.delete_from_storage_channel", tg.delete_from_storage_channel):
             with patch("app.routers.files.invalidate_meta"):
-                result, status_code = await batch_delete_files(
+                response = await batch_delete_files(
                     payload=[1, 2], db=db, admin=user
                 )
 
+        result = json.loads(response.body)
         # File 1 should succeed, file 2 should fail in DB
         assert result["deleted"] == [1]
         assert result["failed_db"] == [2]
+        assert response.status_code == 207
         assert db.rolled_back is True  # rollback called after file 2 failure
 
     asyncio.run(_test())
@@ -907,12 +937,14 @@ def test_batch_delete_preserves_db_row_on_telegram_failure():
         tg.delete_results[1001] = False
 
         with patch("app.routers.files.delete_from_storage_channel", tg.delete_from_storage_channel):
-            result, status_code = await batch_delete_files(payload=[1], db=db, admin=user)
+            response = await batch_delete_files(payload=[1], db=db, admin=user)
 
         # File should not be deleted from DB
+        result = json.loads(response.body)
         assert 1 in db.files
         assert result["deleted"] == []
         assert result["failed_telegram"] == [1]
-        assert status_code == 207
+        assert result["failed_db"] == []
+        assert response.status_code == 207
 
     asyncio.run(_test())
