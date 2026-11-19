@@ -5,7 +5,7 @@
 Task IDs continue the repo's T-numbering (T12.1 and T16 are new). One task = one branch = one Copilot prompt = ONE final commit = one owner-merged PR.
 
 ## Constraints & Rules (apply to every task)
-* **Frozen:** `web/src/components/MediaPlayer.tsx` byte-identical; preserve its imports (`TelegramFile`, `formatDuration`, `useUpdateProgress`, `useFile`, `api`, `useAppStore`) and keys `hearth_player_prefs`, `hearth_device_id`.
+* **Frozen:** `web/src/components/MediaPlayer.tsx` byte-identical except for the one-time T12.3 owner-authorized SPEEDS constant change (and minimal speed-chip layout only if required); preserve its imports (`TelegramFile`, `formatDuration`, `useUpdateProgress`, `useFile`, `api`, `useAppStore`) and keys `hearth_player_prefs`, `hearth_device_id`. Freeze resumes after T12.3.
 * **Non-goals:** Android, folders, search, multi-select, rename/move, QR, public links, transcoding, Redis, Docker, SQLite, helper bots, Alembic (today), broad dependency upgrades.
 * **Sanitizer notice:** filename sanitizer and `escape_like` are CORRECT — never alter or "repair".
 * One Uvicorn worker; Python 3.13 (Debian 13 native; decision in HANDOFF); Node 20; `npm ci`; pinned `requirements.txt`.
@@ -194,6 +194,20 @@ npm audit --omit=dev                     # review + record; NO audit fix --force
 * Tag `v1.0-rc` on the final commit. Report the SHA — **owner records it as RELEASE_SHA in PROGRESS → Deployment Readiness when merging.** Deploy only this SHA.
 * `PROGRESS.md`: tick T14, Current Task → T0.
 **Commit:** `T14: Comprehensive Test Suite & Final Hygiene — gate passed`
+
+## T12.3 — Login message polish, 10 playback speeds, DB-outage 503
+
+**Branch:** `hearth/t12.3` from merged T12.2. **Files (exact):**
+* `web/src/App.tsx` — replace only the family and guest invalid/expired login messages with the requested help text.
+* `web/src/components/MediaPlayer.tsx` — owner-authorized one-time exception: change only `SPEEDS` to `[0.5, 0.75, 1, 1.1, 1.2, 1.25, 1.35, 1.5, 1.75, 2]`; a minimal speed-chip layout change is allowed only if required to prevent overflow/clipping. Freeze resumes for subsequent tasks.
+* `backend/app/main.py` — add a 503 handler only for SQLAlchemy `OperationalError`/`DBAPIError`, `socket.gaierror`, and `ConnectionError`/`OSError`; warning logs include only the exception class name.
+* `backend/tests/` — test an authenticated route's DB-connection failure response and a successful normal request.
+* `HANDOFF.md`, `PLAN.md`, `PROGRESS.md`, `AUDIT_REPORT.md` — record exception, task, progress, findings and fresh gate evidence.
+
+Playback compatibility investigation is documentation-only; do not change playback implementation or add a device-compatibility badge without owner approval.
+
+**Gate:** full backend pytest, `compileall -q app`, `pip check`; frontend `npm ci`, lint, typecheck, test, build; verify all ten speeds are accepted/persisted/applied and speed stepping fallback index 2 remains 1×; MediaPlayer diff limited to `SPEEDS` (+ optional minimal chip-row layout); `git diff --stat` limited to authorized files.
+**Commit:** `T12.3: Login message polish, 10 playback speeds, DB-outage 503 — gate passed`
 
 ## T0 — Verified Backups (OWNER, BEFORE first production boot; agent may assist)
 

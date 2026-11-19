@@ -12,12 +12,15 @@ Production features:
 
 import asyncio
 import logging
+import socket
 from contextlib import asynccontextmanager
 
 import psutil
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
 from sqlalchemy import text
+from sqlalchemy.exc import DBAPIError, OperationalError
 
 from .config import get_settings
 from .database import async_session, engine, init_db
@@ -120,6 +123,28 @@ app = FastAPI(
     version="1.0.0",
     lifespan=lifespan,
 )
+
+
+async def service_unavailable_handler(request: Request, exc: Exception) -> JSONResponse:
+    logger.warning("Service temporarily unavailable (%s)", type(exc).__name__)
+    return JSONResponse(
+        status_code=503,
+        content={
+            "code": "SERVICE_UNAVAILABLE",
+            "message": "Service is temporarily unavailable. Please try again in a moment.",
+        },
+    )
+
+
+for connection_error in (
+    OperationalError,
+    DBAPIError,
+    socket.gaierror,
+    ConnectionError,
+    OSError,
+):
+    app.add_exception_handler(connection_error, service_unavailable_handler)
+
 
 # ============================================================================
 # CORS Middleware

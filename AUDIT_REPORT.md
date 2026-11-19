@@ -150,3 +150,43 @@ Tested SHA = branch tip `56fbf4aa3953c9fc655c254595f7f01d5261f4e1`. After the ow
 - `git diff -- web/src/components/MediaPlayer.tsx` — **empty**
 - Exactly the six authorized files are intended for this task; no dependency manifests were changed.
 - **VERIFY ON VPS:** systemd/Caddy live validation; fresh-session Telegram MTProto IPv6 connection at first boot; release deploy must use the owner's re-frozen merge SHA. T0 backups remain on hold.
+
+## T12.3 — local acceptance findings & fixes
+
+### Findings and changes
+
+- **T12.2 merge — CONFIRMED:** branch base `e8c8135cfff619969af659fc56738b15cd48c25a` has tree `0a92775113765426a97e503b5dc6e6c57e598698`, matching the T12.2-reported tree.
+- **CRITICAL — CONFIRMED:** T12.2's batch-delete tuple-to-`JSONResponse` fix remains in the merge; the full T12.3 backend suite, including its response regression coverage, passed.
+- **Login copy — CONFIRMED:** the family and guest invalid/expired messages now direct users to obtain the appropriate code/PIN and offer switching login modes. Rate-limit and other messages were not changed.
+- **Playback speeds — CONFIRMED:** extended from 7 to 10 values using the **OWNER-AUTHORIZED one-time `MediaPlayer.tsx` exception**. The freeze resumes for all subsequent tasks; the only `MediaPlayer.tsx` change is the SPEEDS line:
+
+  ```diff
+  -const SPEEDS: readonly number[] = [0.5, 0.75, 1, 1.25, 1.5, 1.75, 2];
+  +const SPEEDS: readonly number[] = [0.5, 0.75, 1, 1.1, 1.2, 1.25, 1.35, 1.5, 1.75, 2];
+  ```
+
+- **Speed behavior — CONFIRMED by source inspection:** preference validation accepts the 10 values and falls back to 1 for unknown values; saved 1.75 remains supported; speed-step fallback index 2 resolves to 1×; playbackRate is synchronized from preferences. The existing chip row uses `flex-wrap` inside the scrollable settings panel, so no layout change was needed. **VERIFY on TV:** visually confirm all chips are visible and focusable with the remote.
+- **DB outage — CONFIRMED from owner-provided traceback:** `socket.gaierror [Errno 11001] getaddrinfo failed` indicates the owner's PC DNS resolver failed to resolve Neon; this is not an application-code or Telegram failure. The app now maps the specified connection exception classes to a concise 503 response and logs only the exception class. Owner-side reliable resolver/flush remains to be done or confirmed. **VERIFY ON VPS:** live behavior with Neon unreachable.
+- **Client message — CONFIRMED by read-only inspection:** the existing `errorMessage()` maps 5xx responses, including 503, to a readable generic server-unavailable message; the existing toast layer renders message text. No web error handling was changed.
+
+### Playback compatibility investigation — NOT VERIFIED
+
+Owner reports that some videos do not play even though backend logs show HTTP 206 and cache HITs, indicating delivery succeeds. The likely cause is browser codec/container support: Tizen/Chrome commonly support MP4 + H.264 + AAC; MKV, HEVC/H.265, AV1, 10-bit H.264, and AC-3/E-AC-3/DTS audio may not play. Telegram may label HEVC-in-MP4 as `video/mp4`. No compatibility code or badge was added. Owner diagnostics: inspect `video.error.code` in DevTools (`4` = `SRC_NOT_SUPPORTED`), compare the bot's `/file <id>` metadata, and run `ffprobe` to inspect `codec_name` on the original. A "may not play on this device" badge remains a P2 idea requiring owner approval.
+
+### Windows npm install incident
+
+- First `npm ci` attempt failed with `EPERM` unlinking `web/node_modules/@esbuild/win32-x64/esbuild.exe`. Process discovery found `esbuild.exe` PID 26368 and no Vite/Vitest Node process. Stopped only PID 26368. Removing the prior `node_modules` tree then failed with access denied on Rollup's native `.node` binary.
+- Renamed the old dependency tree to `web/node_modules_locked` and ran a fresh `npm ci`, which **passed** with Node 20.19.5 / npm 10.8.2 (445 packages installed). `web/node_modules_locked` remains untracked and was not staged; owner should remove it after reboot. No antivirus setting or dependency manifest was changed.
+
+### Fresh T12.3 gate evidence — CONFIRMED
+
+- **Date / branch:** 2026-11-19 / `hearth/t12.3`
+- **Base SHA / tree:** `e8c8135cfff619969af659fc56738b15cd48c25a` / `0a92775113765426a97e503b5dc6e6c57e598698`
+- **Python:** 3.13.0; `.venv\Scripts\python -m pytest -q -rw` — **132 passed, 18 warnings**; `.venv\Scripts\python -m compileall -q app` — **PASS**; `.venv\Scripts\pip check` — **PASS, no broken requirements**.
+- **Warnings:** 10 `python-jose` `datetime.utcnow()` deprecations are emitted by the five new test cases (token encode/decode); 2 more occur in existing stream-auth tests. Other categories: Pyrogram no-current-event-loop deprecation (1), Starlette `BlockingPortal` alias deprecation (1), existing `app.bot` `datetime.utcnow()` deprecations (3), and an existing unawaited `asyncio.sleep` runtime warning in `test_streaming_security.py` (1). The pytest-asyncio loop-scope deprecation is also printed at startup. No new unclosed-session, resource, or unawaited-coroutine warning came from the outage tests; no warning-driven code change was made.
+- **Node/npm:** Node 20.19.5 / npm 10.8.2; fresh `npm ci` — **PASS** (npm reported 27 dependency-tree advisories: 1 low, 7 moderate, 17 high, 2 critical; no audit fix or dependency edits).
+- `npm run lint` — **PASS**; `npm run typecheck` — **PASS**; `npm test` — **2 files, 13 tests passed**; `npm run build` — **PASS**; `dist/_redirects` — **present**.
+- Supplemental values check — **CONFIRMED:** 10 ascending speeds; index 2 is 1; old 1.75 preference remains included.
+- `git diff -- web/src/components/MediaPlayer.tsx` — **SPEEDS line only**, as pasted above. `git diff --stat -- web/package.json web/package-lock.json` — **empty**.
+- Final commit SHA/tree are recorded in the task completion report; this evidence was run on the listed branch before commit.
+- **NOT VERIFIED:** owner TV visual/remote acceptance; owner's DNS resolver correction; live VPS DB-outage behavior; final merge SHA and release re-freeze. T0 backups remain on hold.
