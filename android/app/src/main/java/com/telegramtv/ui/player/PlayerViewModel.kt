@@ -217,6 +217,9 @@ class PlayerViewModel @Inject constructor(
         startProgressTracking()
     }
 
+    private var retryCount = 0
+    private val maxRetries = 3
+
     /**
      * Set up ExoPlayer event listener.
      */
@@ -229,6 +232,7 @@ class PlayerViewModel @Inject constructor(
                         _uiState.value = _uiState.value.copy(isBuffering = true)
                     }
                     Player.STATE_READY -> {
+                        retryCount = 0 // Reset retry count on successful play
                         _uiState.value = _uiState.value.copy(
                             isLoading = false,
                             isBuffering = false,
@@ -263,11 +267,17 @@ class PlayerViewModel @Inject constructor(
             override fun onPlayerError(error: PlaybackException) {
                 // Save progress immediately before transitioning to error state
                 saveProgress()
-                val parsedError = parsePlaybackError(error)
-                _uiState.value = _uiState.value.copy(
-                    isLoading = false,
-                    error = parsedError
-                )
+
+                if (retryCount < maxRetries) {
+                    retryCount++
+                    retry()
+                } else {
+                    val parsedError = parsePlaybackError(error)
+                    _uiState.value = _uiState.value.copy(
+                        isLoading = false,
+                        error = parsedError
+                    )
+                }
             }
         })
     }
